@@ -44,8 +44,9 @@ export function applyGravityAndBuoyancy(engine: VoxelWorldEngine, options: Buoya
   const staticSurface = buildStaticSurfaceColumns(engine);
   const gravity = 9.81;
   const waterDensity = 1.0;
-  const waterLinearDrag = 5.2;
-  const airLinearDrag = 0.18;
+  const waterLinearDrag = 2.2;
+  const airLinearDrag = 0.08;
+  const maxFluidDrag = 55;
 
   for (const entity of engine.listEntities()) {
     if (entity.id === engine.rootId) continue;
@@ -53,7 +54,8 @@ export function applyGravityAndBuoyancy(engine: VoxelWorldEngine, options: Buoya
     const debug = engine.getIntrospection(entity.id);
 
     let totalMass = 0;
-    let submergedMass = 0;
+    let submergedVolume = 0;
+    let totalVolume = 0;
     const weightedCom = new THREE.Vector3();
     let displacedMass = 0;
     const weightedCob = new THREE.Vector3();
@@ -64,11 +66,12 @@ export function applyGravityAndBuoyancy(engine: VoxelWorldEngine, options: Buoya
       const blockMass = Math.max(0.01, options.resolveBlockMass?.(voxel.value) ?? 1);
       totalMass += blockMass;
       weightedCom.addScaledVector(worldPoint, blockMass);
+      totalVolume += 1;
 
       const depth = options.waterLevel - worldPoint.y;
       const submersion = THREE.MathUtils.clamp((depth + 0.5) / 1.0, 0, 1);
       if (submersion > 0) {
-        submergedMass += blockMass * submersion;
+        submergedVolume += submersion;
         // Treat each voxel as unit volume and scale displaced mass by submerged fraction.
         const displaced = waterDensity * submersion;
         displacedMass += displaced;
@@ -104,14 +107,16 @@ export function applyGravityAndBuoyancy(engine: VoxelWorldEngine, options: Buoya
       });
     }
 
-    const exposedMass = Math.max(0, totalMass - submergedMass);
+    const submergedRatio = totalVolume > 0 ? THREE.MathUtils.clamp(submergedVolume / totalVolume, 0, 1) : 0;
+    const exposedRatio = 1 - submergedRatio;
     const velocity = new THREE.Vector3(debug.worldVelocity.x, debug.worldVelocity.y, debug.worldVelocity.z);
     const speed = velocity.length();
     if (speed > 1e-4) {
       const dragDirection = velocity.multiplyScalar(-1 / speed);
-      const waterDragMagnitude = waterLinearDrag * submergedMass * speed;
-      const airDragMagnitude = airLinearDrag * exposedMass * speed;
-      const totalDrag = dragDirection.multiplyScalar(waterDragMagnitude + airDragMagnitude);
+      const waterDragMagnitude = waterLinearDrag * submergedRatio * speed;
+      const airDragMagnitude = airLinearDrag * exposedRatio * speed;
+      const dragMagnitude = Math.min(maxFluidDrag, waterDragMagnitude + airDragMagnitude);
+      const totalDrag = dragDirection.multiplyScalar(dragMagnitude);
       engine.addForce(entity.id, {
         label: "fluid-drag",
         source: centerOfMass,

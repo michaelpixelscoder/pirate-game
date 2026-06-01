@@ -195,6 +195,25 @@ function blockTextureKey(block: string) {
   return null;
 }
 
+function textureSwatchStyle(textureKey: string) {
+  if (textureKey === "rudder") {
+    return "background-image:url('/textures/rudder.png');background-size:cover;background-position:center;";
+  }
+  const tile = atlasTiles[textureKey];
+  if (!tile) return "";
+  const xPercent = (tile.col / Math.max(1, ATLAS_GRID_COLS - 1)) * 100;
+  const yPercent = (tile.row / Math.max(1, ATLAS_GRID_ROWS - 1)) * 100;
+  return `background-image:url('/textures/block-atlas.png');background-size:${ATLAS_GRID_COLS * 100}% ${ATLAS_GRID_ROWS * 100}%;background-position:${xPercent}% ${yPercent}%;`;
+}
+
+function buildToolbarSwatch(entry: { icon: string; blockId?: string }, index: number) {
+  if (index === 0) return `<span class="swatch">${entry.icon}</span>`;
+  if (!entry.blockId) return `<span class="swatch">${entry.icon}</span>`;
+  const key = blockTextureKey(entry.blockId);
+  if (!key) return `<span class="swatch">${entry.icon}</span>`;
+  return `<span class="swatch swatch--texture" style="${textureSwatchStyle(key)}"></span>`;
+}
+
 function blockMaterial(block: string) {
   const textureKey = blockTextureKey(block);
   const cacheKey = textureKey ?? `color:${block}`;
@@ -346,7 +365,7 @@ function renderBuildToolbar() {
       const active = index === blockPlacement.selectionIndex ? "active" : "";
       return `
         <button class="block-slot ${active}" type="button" data-tool-index="${index}">
-          <span class="swatch">${entry.icon}</span>
+          ${buildToolbarSwatch(entry, index)}
           <span class="slot-name">${index === 0 ? "Empty Hand" : entry.name}</span>
         </button>
       `;
@@ -593,6 +612,11 @@ if (!toolbarEl) throw new Error("Missing toolbar panel");
 const toolbarButtons = Array.from(toolbarEl.querySelectorAll<HTMLButtonElement>("button"));
 
 document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.code === "KeyW") {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   keys.add(event.code);
   if (event.code === "KeyC" && !event.repeat) cycleSelectedEntity();
   if (event.code === "KeyR" && !event.repeat) {

@@ -212,6 +212,11 @@ canvas {
   background: rgb(255 255 255 / 8%);
 }
 
+.block-slot .swatch.swatch--texture {
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+}
+
 .block-slot .slot-name {
   overflow: hidden;
   white-space: nowrap;
