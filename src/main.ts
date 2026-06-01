@@ -1,1071 +1,748 @@
 import "./style.css";
-import RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
+import { VoxelWorldEngine } from "./engine";
+import { createDefaultBlockRegistry, BlockPlacementSystem } from "./building";
+import { DebugVectorRenderer, clearGroup } from "./rendering/debugVectors";
+import { applyGravityAndBuoyancy } from "./gameplay/buoyancy";
+import { updatePlayerMotion } from "./gameplay/playerController";
+import { createWaterMaterial } from "./rendering/water";
+import { createBoatTemplate, createCatamaranTemplate, createPenicheTemplate } from "./worlds/boat";
+import { createIslandTemplate } from "./worlds/island";
+import { templateVoxels } from "./worlds/utils.ts";
+import type { EntityId, VoxelCell } from "./engine";
 
-type BlockKind =
-  | "stone"
-  | "dirt"
-  | "sand"
-  | "wood_trunk"
-  | "foliage"
-  | "wood_plank"
-  | "rudder";
-
-type BlockShape = "block" | "slab" | "stairs" | "side_wall" | "center_wall";
-type Orientation = "north" | "east" | "south" | "west";
-type SlabPosition = "bottom" | "center" | "top";
-type BlockId = string;
-type ToolId = "empty" | BlockId;
-
-type BlockDefinition = {
-  id: BlockId;
-  label: string;
-  kind: BlockKind;
-  shape: BlockShape;
-  color: number;
-  solid: boolean;
-  orientation?: Orientation;
-  slabPosition?: SlabPosition;
+type EntityView = {
+  group: THREE.Group;
+  voxelCount: number;
 };
 
-type VoxelHit = {
-  entity: VoxelEntity;
-  voxel: THREE.Vector3;
-  position: THREE.Vector3;
-  normal: THREE.Vector3;
+const BLOCK_COLORS: Record<string, number> = {
+  stone: 0x87919a,
+  dirt: 0x7b5535,
+  sand: 0xd9c47c,
+  wood_trunk: 0x6b4629,
+  foliage: 0x3f8f4d,
+  wood_plank: 0xb8824c,
+  rudder: 0x6e4024,
+  sail: 0xf1e4c4,
+  keel: 0x51351f
 };
 
-type ShapeBox = {
-  min: THREE.Vector3;
-  max: THREE.Vector3;
-};
+const textureLoader = new THREE.TextureLoader();
+const atlasTexture = textureLoader.load("/textures/block-atlas.png");
+atlasTexture.wrapS = THREE.RepeatWrapping;
+atlasTexture.wrapT = THREE.RepeatWrapping;
+atlasTexture.magFilter = THREE.NearestFilter;
+atlasTexture.minFilter = THREE.NearestMipmapNearestFilter;
+atlasTexture.colorSpace = THREE.SRGBColorSpace;
 
-type ShipAttachment = {
-  ship: VoxelEntity;
-  localPosition: THREE.Vector3;
-  lastWorldPosition: THREE.Vector3;
-  missingSince: number | null;
-};
+const rudderTexture = textureLoader.load("/textures/rudder.png");
+rudderTexture.wrapS = THREE.RepeatWrapping;
+rudderTexture.wrapT = THREE.RepeatWrapping;
+rudderTexture.magFilter = THREE.NearestFilter;
+rudderTexture.minFilter = THREE.NearestMipmapNearestFilter;
+rudderTexture.colorSpace = THREE.SRGBColorSpace;
 
-const BLOCKS: Record<BlockId, BlockDefinition> = {
-  stone_block: { id: "stone_block", label: "Stone", kind: "stone", shape: "block", color: 0x87919a, solid: true },
-  stone_slab_bottom: { id: "stone_slab_bottom", label: "Slab Bottom", kind: "stone", shape: "slab", color: 0x87919a, solid: true, slabPosition: "bottom" },
-  stone_slab_center: { id: "stone_slab_center", label: "Slab Center", kind: "stone", shape: "slab", color: 0x87919a, solid: true, slabPosition: "center" },
-  stone_slab_top: { id: "stone_slab_top", label: "Slab Top", kind: "stone", shape: "slab", color: 0x87919a, solid: true, slabPosition: "top" },
-  stone_stairs_north: { id: "stone_stairs_north", label: "Stair N", kind: "stone", shape: "stairs", color: 0x87919a, solid: true, orientation: "north" },
-  stone_stairs_east: { id: "stone_stairs_east", label: "Stair E", kind: "stone", shape: "stairs", color: 0x87919a, solid: true, orientation: "east" },
-  stone_stairs_south: { id: "stone_stairs_south", label: "Stair S", kind: "stone", shape: "stairs", color: 0x87919a, solid: true, orientation: "south" },
-  stone_stairs_west: { id: "stone_stairs_west", label: "Stair W", kind: "stone", shape: "stairs", color: 0x87919a, solid: true, orientation: "west" },
-  stone_side_wall_north: { id: "stone_side_wall_north", label: "Wall N", kind: "stone", shape: "side_wall", color: 0x87919a, solid: true, orientation: "north" },
-  stone_side_wall_east: { id: "stone_side_wall_east", label: "Wall E", kind: "stone", shape: "side_wall", color: 0x87919a, solid: true, orientation: "east" },
-  stone_side_wall_south: { id: "stone_side_wall_south", label: "Wall S", kind: "stone", shape: "side_wall", color: 0x87919a, solid: true, orientation: "south" },
-  stone_side_wall_west: { id: "stone_side_wall_west", label: "Wall W", kind: "stone", shape: "side_wall", color: 0x87919a, solid: true, orientation: "west" },
-  stone_center_wall: { id: "stone_center_wall", label: "Post", kind: "stone", shape: "center_wall", color: 0x87919a, solid: true },
-  dirt_block: { id: "dirt_block", label: "Dirt", kind: "dirt", shape: "block", color: 0x7b5535, solid: true },
-  sand_block: { id: "sand_block", label: "Sand", kind: "sand", shape: "block", color: 0xd9c47c, solid: true },
-  wood_trunk_block: { id: "wood_trunk_block", label: "Trunk", kind: "wood_trunk", shape: "block", color: 0x6b4629, solid: true },
-  foliage_block: { id: "foliage_block", label: "Leaf", kind: "foliage", shape: "block", color: 0x3f8f4d, solid: true },
-  wood_plank_block: { id: "wood_plank_block", label: "Plank", kind: "wood_plank", shape: "block", color: 0xb8824c, solid: true },
-  wood_plank_slab_bottom: { id: "wood_plank_slab_bottom", label: "Slab Bottom", kind: "wood_plank", shape: "slab", color: 0xb8824c, solid: true, slabPosition: "bottom" },
-  wood_plank_slab_center: { id: "wood_plank_slab_center", label: "Slab Center", kind: "wood_plank", shape: "slab", color: 0xb8824c, solid: true, slabPosition: "center" },
-  wood_plank_slab_top: { id: "wood_plank_slab_top", label: "Slab Top", kind: "wood_plank", shape: "slab", color: 0xb8824c, solid: true, slabPosition: "top" },
-  wood_plank_stairs_north: { id: "wood_plank_stairs_north", label: "Stair N", kind: "wood_plank", shape: "stairs", color: 0xb8824c, solid: true, orientation: "north" },
-  wood_plank_stairs_east: { id: "wood_plank_stairs_east", label: "Stair E", kind: "wood_plank", shape: "stairs", color: 0xb8824c, solid: true, orientation: "east" },
-  wood_plank_stairs_south: { id: "wood_plank_stairs_south", label: "Stair S", kind: "wood_plank", shape: "stairs", color: 0xb8824c, solid: true, orientation: "south" },
-  wood_plank_stairs_west: { id: "wood_plank_stairs_west", label: "Stair W", kind: "wood_plank", shape: "stairs", color: 0xb8824c, solid: true, orientation: "west" },
-  wood_plank_side_wall_north: { id: "wood_plank_side_wall_north", label: "Wall N", kind: "wood_plank", shape: "side_wall", color: 0xb8824c, solid: true, orientation: "north" },
-  wood_plank_side_wall_east: { id: "wood_plank_side_wall_east", label: "Wall E", kind: "wood_plank", shape: "side_wall", color: 0xb8824c, solid: true, orientation: "east" },
-  wood_plank_side_wall_south: { id: "wood_plank_side_wall_south", label: "Wall S", kind: "wood_plank", shape: "side_wall", color: 0xb8824c, solid: true, orientation: "south" },
-  wood_plank_side_wall_west: { id: "wood_plank_side_wall_west", label: "Wall W", kind: "wood_plank", shape: "side_wall", color: 0xb8824c, solid: true, orientation: "west" },
-  wood_plank_center_wall: { id: "wood_plank_center_wall", label: "Post", kind: "wood_plank", shape: "center_wall", color: 0xb8824c, solid: true },
-  rudder_block_north: { id: "rudder_block_north", label: "Rudder N", kind: "rudder", shape: "side_wall", color: 0x6e4024, solid: true, orientation: "north" },
-  rudder_block_east: { id: "rudder_block_east", label: "Rudder E", kind: "rudder", shape: "side_wall", color: 0x6e4024, solid: true, orientation: "east" },
-  rudder_block_south: { id: "rudder_block_south", label: "Rudder S", kind: "rudder", shape: "side_wall", color: 0x6e4024, solid: true, orientation: "south" },
-  rudder_block_west: { id: "rudder_block_west", label: "Rudder W", kind: "rudder", shape: "side_wall", color: 0x6e4024, solid: true, orientation: "west" }
-};
+const blockMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
 
-const PALETTE: ToolId[] = [
-  "empty",
-  "wood_plank_block",
-  "wood_plank_slab_bottom",
-  "wood_plank_stairs_north",
-  "wood_plank_side_wall_north",
-  "stone_block",
-  "stone_slab_bottom",
-  "dirt_block",
-  "sand_block",
-  "wood_trunk_block",
-  "foliage_block",
-  "rudder_block_north"
-];
-
-const app = document.querySelector<HTMLDivElement>("#app");
-if (!app) throw new Error("Missing #app container");
-const root = app;
-
-root.innerHTML = `
-  <div class="hud">
-    <div class="panel">
-      <div class="title">Pirate Voxel Builder</div>
-      <div class="meta">Click to capture mouse. WASD moves, double Space toggles fly. Scroll or 0 selects tools, R rotates, E uses rudder. Rudder: W/S sails, Shift boosts, A/D turns. Left click mines, right click builds.</div>
-    </div>
-    <div class="panel palette"></div>
-  </div>
-  <div class="reticle"></div>
-  <div class="toast"></div>
-`;
-
-const paletteEl = document.querySelector<HTMLDivElement>(".palette");
-const toastEl = document.querySelector<HTMLDivElement>(".toast");
-let selectedTool: ToolId = "empty";
-let selectedBlock: BlockId | null = null;
-let selectedIndex = 0;
-let selectedOrientation: Orientation = "north";
-let selectedSlabPosition: SlabPosition = "bottom";
-let flyMode = false;
-let lastSpaceTap = 0;
-let suppressNextJump = false;
-let activeRudderShip: VoxelEntity | null = null;
-let activeRudderOrientation: Orientation = "south";
-let activeShipYaw: number | null = null;
-let shipAttachment: ShipAttachment | null = null;
-let toastUntil = 0;
-
-const ORIENTATIONS: Orientation[] = ["north", "east", "south", "west"];
-const SLAB_POSITIONS: SlabPosition[] = ["bottom", "center", "top"];
-const WATER_LEVEL = -0.1;
-const PLAYER_FOOT_OFFSET = 1.18;
-
-const fullBox = (minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number): ShapeBox => ({
-  min: new THREE.Vector3(minX, minY, minZ),
-  max: new THREE.Vector3(maxX, maxY, maxZ)
-});
-
-const SHAPE_BOXES: Record<BlockShape, ShapeBox[]> = {
-  block: [fullBox(0, 0, 0, 1, 1, 1)],
-  slab: [fullBox(0, 0, 0, 1, 0.5, 1)],
-  stairs: [fullBox(0, 0, 0, 1, 0.5, 1), fullBox(0, 0.5, 0.5, 1, 1, 1)],
-  side_wall: [fullBox(0, 0, 0, 1, 1, 0.28)],
-  center_wall: [fullBox(0.3, 0, 0.3, 0.7, 1, 0.7)]
-};
-
-const ATLAS_TILE: Record<BlockKind, { col: number; row: number }> = {
+type AtlasTile = { col: number; row: number };
+const ATLAS_GRID_COLS = 3;
+const ATLAS_GRID_ROWS = 2;
+const atlasTiles: Record<string, AtlasTile> = {
   stone: { col: 0, row: 0 },
   dirt: { col: 1, row: 0 },
   sand: { col: 2, row: 0 },
   wood_trunk: { col: 0, row: 1 },
   foliage: { col: 1, row: 1 },
-  wood_plank: { col: 2, row: 1 },
-  rudder: { col: 2, row: 1 }
+  wood_plank: { col: 2, row: 1 }
 };
 
-function renderPalette() {
-  if (!paletteEl) return;
-  paletteEl.innerHTML = PALETTE.map((tool, index) => {
-    const block = tool === "empty" ? null : BLOCKS[orientBlockId(tool)];
-    const label = tool === "empty" ? "Empty" : block?.label.replace(/ [NESW]$/, "") ?? "Block";
-    const slotNumber = index === 0 ? "0" : String(index);
-    return `<div class="slot ${tool === selectedTool ? "active" : ""}">
-      <span class="swatch" style="background:${block ? `#${block.color.toString(16).padStart(6, "0")}` : "transparent"}"></span>
-      <span>${slotNumber}. ${label}</span>
-    </div>`;
-  }).join("");
+const app = document.querySelector<HTMLDivElement>("#app");
+if (!app) throw new Error("Missing #app container");
+
+app.innerHTML = `
+  <div class="hud">
+    <div class="panel">
+      <div class="title">Voxel Engine Prototype</div>
+      <div class="meta">Agnostic engine pass: parented entities, world/local transforms, force introspection, and a bottom toolbar for core tools.</div>
+    </div>
+    <div class="panel entity-list"></div>
+  </div>
+  <div class="info"></div>
+  <div class="forces panel"></div>
+  <div class="block-toolbar panel"></div>
+  <div class="toolbar panel"></div>
+  <div class="destroy-progress"></div>
+  <div class="reticle"></div>
+`;
+
+const entityListEl = document.querySelector<HTMLDivElement>(".entity-list");
+const infoEl = document.querySelector<HTMLDivElement>(".info");
+const forcesEl = document.querySelector<HTMLDivElement>(".forces");
+const blockToolbarEl = document.querySelector<HTMLDivElement>(".block-toolbar");
+const toolbarEl = document.querySelector<HTMLDivElement>(".toolbar");
+const destroyProgressEl = document.querySelector<HTMLDivElement>(".destroy-progress");
+const WATER_LEVEL = -0.1;
+
+const engine = new VoxelWorldEngine();
+const blockRegistry = createDefaultBlockRegistry();
+const blockPlacement = new BlockPlacementSystem(engine, blockRegistry, () =>
+  engine.listEntities().filter((entity) => entity.kind === "voxel" && entity.id !== engine.rootId).map((entity) => entity.id)
+);
+const debugVectorRenderer = new DebugVectorRenderer(engine);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x88c8df);
+scene.fog = new THREE.FogExp2(0x88c8df, 0.018);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.domElement.tabIndex = 0;
+renderer.domElement.style.outline = "none";
+app.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(72, window.innerWidth / window.innerHeight, 0.1, 900);
+camera.position.set(0, 4, 10);
+const controls = new PointerLockControls(camera, renderer.domElement);
+scene.add(controls.object);
+
+scene.add(new THREE.HemisphereLight(0xbdeeff, 0x245066, 1.8));
+const sun = new THREE.DirectionalLight(0xfff3c7, 3.2);
+sun.position.set(-25, 45, 28);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+scene.add(sun);
+
+const waterMaterial = createWaterMaterial(WATER_LEVEL);
+const water = new THREE.Mesh(new THREE.PlaneGeometry(2000, 2000, 200, 200), waterMaterial);
+water.rotation.x = -Math.PI / 2;
+water.position.y = WATER_LEVEL;
+water.renderOrder = 1;
+scene.add(water);
+
+const underWater = new THREE.Mesh(
+  new THREE.PlaneGeometry(2000, 2000, 1, 1),
+  new THREE.MeshStandardMaterial({ color: 0x082739, roughness: 1, metalness: 0 })
+);
+underWater.rotation.x = -Math.PI / 2;
+underWater.position.y = WATER_LEVEL - 0.4;
+scene.add(underWater);
+
+const entityViews = new Map<EntityId, EntityView>();
+scene.add(debugVectorRenderer.group);
+const ghostGroup = new THREE.Group();
+ghostGroup.name = "block-ghost";
+scene.add(ghostGroup);
+
+const keys = new Set<string>();
+let selectedEntityId: EntityId = "ship";
+let gravityEnabled = true;
+let cameraYaw = 0;
+let cameraPitch = -0.1;
+let draggingLook = false;
+let movementForward = 0;
+let movementStrafe = 0;
+let movementVertical = 0;
+let primaryMouseDown = false;
+
+function focusGameInput() {
+  renderer.domElement.focus();
 }
 
-renderPalette();
-
-function selectPaletteIndex(index: number) {
-  selectedIndex = (index + PALETTE.length) % PALETTE.length;
-  selectedTool = PALETTE[selectedIndex];
-  selectedBlock = selectedTool === "empty" ? null : orientBlockId(selectedTool);
-  renderPalette();
+function setMovementState(event: KeyboardEvent, isDown: boolean) {
+  if (event.code === "KeyW") movementForward = isDown ? 1 : 0;
+  if (event.code === "KeyS") movementForward = isDown ? -1 : 0;
+  if (event.code === "KeyD") movementStrafe = isDown ? 1 : 0;
+  if (event.code === "KeyA") movementStrafe = isDown ? -1 : 0;
+  if (event.code === "Space") movementVertical = isDown ? 1 : 0;
+  if (event.code === "ControlLeft") movementVertical = isDown ? -1 : 0;
 }
 
-function orientBlockId(id: ToolId) {
-  if (id === "empty") return id;
-  const block = BLOCKS[id];
-  if (block.slabPosition) return id.replace(/_(bottom|center|top)$/, `_${selectedSlabPosition}`);
-  if (block.orientation) return id.replace(/_(north|east|south|west)$/, `_${selectedOrientation}`);
-  return id;
+function blockColor(block: string) {
+  const registered = blockRegistry.getBlock(block);
+  if (registered) return registered.color;
+  if (block.includes("stone")) return BLOCK_COLORS.stone;
+  if (block.includes("dirt")) return BLOCK_COLORS.dirt;
+  if (block.includes("sand")) return BLOCK_COLORS.sand;
+  if (block.includes("trunk")) return BLOCK_COLORS.wood_trunk;
+  if (block.includes("foliage")) return BLOCK_COLORS.foliage;
+  if (block.includes("plank")) return BLOCK_COLORS.wood_plank;
+  if (block.includes("rudder")) return BLOCK_COLORS.rudder;
+  if (block.includes("sail")) return BLOCK_COLORS.sail;
+  if (block.includes("keel")) return BLOCK_COLORS.keel;
+  return 0xb7c3cb;
 }
 
-function rotateSelectedOrientation() {
-  if (selectedTool !== "empty" && BLOCKS[selectedTool].slabPosition) {
-    selectedSlabPosition = SLAB_POSITIONS[(SLAB_POSITIONS.indexOf(selectedSlabPosition) + 1) % SLAB_POSITIONS.length];
-  } else {
-    selectedOrientation = ORIENTATIONS[(ORIENTATIONS.indexOf(selectedOrientation) + 1) % ORIENTATIONS.length];
-  }
-  if (selectedTool !== "empty") selectedBlock = orientBlockId(selectedTool);
-  renderPalette();
-}
-
-function showToast(message: string, now = performance.now()) {
-  if (!toastEl) return;
-  toastEl.textContent = message;
-  toastEl.classList.add("show");
-  toastUntil = now + 1800;
-}
-
-function updateToast(now = performance.now()) {
-  if (toastEl && toastUntil > 0 && now > toastUntil) {
-    toastEl.classList.remove("show");
-    toastUntil = 0;
-  }
-}
-
-const blockAtlas = new THREE.TextureLoader().load("/textures/block-atlas.png");
-blockAtlas.colorSpace = THREE.SRGBColorSpace;
-blockAtlas.magFilter = THREE.NearestFilter;
-blockAtlas.minFilter = THREE.NearestMipmapNearestFilter;
-blockAtlas.wrapS = THREE.RepeatWrapping;
-blockAtlas.wrapT = THREE.RepeatWrapping;
-
-const rudderTexture = new THREE.TextureLoader().load("/textures/rudder.png");
-rudderTexture.colorSpace = THREE.SRGBColorSpace;
-rudderTexture.magFilter = THREE.NearestFilter;
-rudderTexture.minFilter = THREE.NearestMipmapNearestFilter;
-rudderTexture.wrapS = THREE.RepeatWrapping;
-rudderTexture.wrapT = THREE.RepeatWrapping;
-
-const waterTexture = createWaterTexture();
-waterTexture.wrapS = THREE.RepeatWrapping;
-waterTexture.wrapT = THREE.RepeatWrapping;
-waterTexture.repeat.set(55, 55);
-
-const waterCausticsTexture = createWaterCausticsTexture();
-waterCausticsTexture.wrapS = THREE.RepeatWrapping;
-waterCausticsTexture.wrapT = THREE.RepeatWrapping;
-waterCausticsTexture.repeat.set(28, 28);
-
-function blockBoxes(id: BlockId) {
-  const block = BLOCKS[id];
-  const turns = block.orientation ? ORIENTATIONS.indexOf(block.orientation) : 0;
-  return SHAPE_BOXES[block.shape].map((box) => positionSlabBox(rotateBoxY(box, turns), block.slabPosition));
-}
-
-function positionSlabBox(box: ShapeBox, slabPosition?: SlabPosition) {
-  if (!slabPosition) return box;
-  if (slabPosition === "bottom") return box;
-  if (slabPosition === "center") return fullBox(box.min.x, 0.25, box.min.z, box.max.x, 0.75, box.max.z);
-  return fullBox(box.min.x, 0.5, box.min.z, box.max.x, 1, box.max.z);
-}
-
-function createWaterTexture() {
-  const canvas = document.createElement("canvas");
-  canvas.width = 128;
-  canvas.height = 128;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Could not create water texture");
-  const gradient = context.createLinearGradient(0, 0, 128, 128);
-  gradient.addColorStop(0, "#2aa0bc");
-  gradient.addColorStop(0.48, "#157f9f");
-  gradient.addColorStop(1, "#0b5f82");
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 128, 128);
-  context.strokeStyle = "rgba(222,255,255,0.2)";
-  context.lineWidth = 1.2;
-  for (let i = -128; i < 256; i += 24) {
-    context.beginPath();
-    context.moveTo(i, 6);
-    context.bezierCurveTo(i + 18, 22, i + 18, 48, i + 42, 62);
-    context.bezierCurveTo(i + 60, 76, i + 58, 104, i + 86, 126);
-    context.stroke();
-  }
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
+function createAtlasTileTexture(tile: AtlasTile) {
+  const texture = atlasTexture.clone();
+  texture.needsUpdate = true;
+  texture.repeat.set(1 / ATLAS_GRID_COLS, 1 / ATLAS_GRID_ROWS);
+  texture.offset.set(tile.col / ATLAS_GRID_COLS, 1 - (tile.row + 1) / ATLAS_GRID_ROWS);
   return texture;
 }
 
-function createWaterCausticsTexture() {
-  const canvas = document.createElement("canvas");
-  canvas.width = 128;
-  canvas.height = 128;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Could not create water caustics texture");
-  context.fillStyle = "#000000";
-  context.fillRect(0, 0, 128, 128);
-  context.globalCompositeOperation = "lighter";
-  context.strokeStyle = "rgba(175,255,245,0.32)";
-  context.lineWidth = 1.5;
-  for (let ring = 0; ring < 18; ring++) {
-    const cx = (ring * 37) % 140 - 6;
-    const cy = (ring * 53) % 140 - 6;
-    context.beginPath();
-    for (let i = 0; i <= 18; i++) {
-      const a = (i / 18) * Math.PI * 2;
-      const r = 10 + Math.sin(i * 2.3 + ring) * 4;
-      const x = cx + Math.cos(a) * r * 1.6;
-      const y = cy + Math.sin(a) * r * 0.7;
-      if (i === 0) context.moveTo(x, y);
-      else context.lineTo(x, y);
-    }
-    context.stroke();
-  }
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
-}
-
-function rotateBoxY(box: ShapeBox, turns: number): ShapeBox {
-  let minX = box.min.x;
-  let minZ = box.min.z;
-  let maxX = box.max.x;
-  let maxZ = box.max.z;
-  for (let i = 0; i < turns; i++) {
-    const nextMinX = 1 - maxZ;
-    const nextMaxX = 1 - minZ;
-    const nextMinZ = minX;
-    const nextMaxZ = maxX;
-    minX = nextMinX;
-    maxX = nextMaxX;
-    minZ = nextMinZ;
-    maxZ = nextMaxZ;
-  }
-  return fullBox(minX, box.min.y, minZ, maxX, box.max.y, maxZ);
-}
-
-class VoxelEntity {
-  readonly group = new THREE.Group();
-  readonly voxels = new Map<string, BlockId>();
-  private mesh?: THREE.Mesh;
-  private colliders: RAPIER.Collider[] = [];
-
-  constructor(
-    readonly name: string,
-    readonly body: RAPIER.RigidBody,
-    private readonly world: RAPIER.World,
-    private readonly scene: THREE.Scene
-  ) {
-    scene.add(this.group);
-  }
-
-  setBlock(x: number, y: number, z: number, block: BlockId | null) {
-    const key = this.key(x, y, z);
-    if (block) {
-      this.voxels.set(key, block);
-    } else {
-      this.voxels.delete(key);
-    }
-    this.rebuild();
-  }
-
-  getBlock(x: number, y: number, z: number) {
-    return this.voxels.get(this.key(x, y, z));
-  }
-
-  rebuild() {
-    if (this.mesh) {
-      this.group.remove(this.mesh);
-      this.mesh.geometry.dispose();
-    }
-    for (const collider of this.colliders) {
-      this.world.removeCollider(collider, false);
-    }
-    this.colliders = [];
-
-    const geometry = buildVoxelGeometry(this.voxels);
-    const material = [
-      new THREE.MeshStandardMaterial({
-        map: blockAtlas,
-        vertexColors: true,
-        roughness: 0.86,
-        metalness: 0.02
-      }),
-      new THREE.MeshStandardMaterial({
-        map: rudderTexture,
-        vertexColors: true,
-        roughness: 0.78,
-        metalness: 0.04
-      })
-    ];
-    this.mesh = new THREE.Mesh(geometry, material);
-    this.mesh.castShadow = true;
-    this.mesh.receiveShadow = true;
-    this.group.add(this.mesh);
-
-    for (const [key, id] of this.voxels) {
-      const [x, y, z] = key.split(",").map(Number);
-      for (const box of blockBoxes(id)) {
-        const size = box.max.clone().sub(box.min);
-        const center = box.min.clone().add(box.max).multiplyScalar(0.5);
-        this.colliders.push(
-          this.world.createCollider(
-            RAPIER.ColliderDesc.cuboid(size.x / 2, size.y / 2, size.z / 2)
-              .setTranslation(x + center.x, y + center.y, z + center.z)
-              .setFriction(0.7),
-            this.body
-          )
-        );
-      }
-    }
-  }
-
-  syncFromPhysics() {
-    const position = this.body.translation();
-    const rotation = this.body.rotation();
-    this.group.position.set(position.x, position.y, position.z);
-    this.group.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w);
-  }
-
-  worldToLocalVoxel(worldPosition: THREE.Vector3) {
-    const local = this.group.worldToLocal(worldPosition.clone());
-    return new THREE.Vector3(Math.floor(local.x), Math.floor(local.y), Math.floor(local.z));
-  }
-
-  localVoxelCenterToWorld(voxel: THREE.Vector3) {
-    return this.group.localToWorld(new THREE.Vector3(voxel.x + 0.5, voxel.y + 0.5, voxel.z + 0.5));
-  }
-
-  hasBlockKind(kind: BlockKind) {
-    for (const id of this.voxels.values()) {
-      if (BLOCKS[id].kind === kind) return true;
-    }
-    return false;
-  }
-
-  nearestBlockKindWorldPosition(kind: BlockKind, worldPosition: THREE.Vector3) {
-    let best: THREE.Vector3 | null = null;
-    let bestDistance = Infinity;
-    for (const [key, id] of this.voxels) {
-      if (BLOCKS[id].kind !== kind) continue;
-      const [x, y, z] = key.split(",").map(Number);
-      const candidate = this.localVoxelCenterToWorld(new THREE.Vector3(x, y, z));
-      const distance = candidate.distanceToSquared(worldPosition);
-      if (distance < bestDistance) {
-        best = candidate;
-        bestDistance = distance;
-      }
-    }
-    return best;
-  }
-
-  localToWorld(localPosition: THREE.Vector3) {
-    return this.group.localToWorld(localPosition.clone());
-  }
-
-  worldToLocal(worldPosition: THREE.Vector3) {
-    return this.group.worldToLocal(worldPosition.clone());
-  }
-
-  private key(x: number, y: number, z: number) {
-    return `${x},${y},${z}`;
-  }
-}
-
-function buildVoxelGeometry(voxels: Map<string, BlockId>) {
-  const positions: number[] = [];
-  const normals: number[] = [];
-  const colors: number[] = [];
-  const uvs: number[] = [];
-  const indices: number[] = [];
-  const geometryGroups: Array<{ start: number; count: number; materialIndex: number }> = [];
-  const color = new THREE.Color();
-
-  const faceUvs = [
-    [0, 0],
-    [0, 1],
-    [1, 1],
-    [1, 0]
-  ];
-  const faces = (box: ShapeBox) => [
-    { dir: [1, 0, 0], corners: [[box.max.x, box.min.y, box.min.z], [box.max.x, box.max.y, box.min.z], [box.max.x, box.max.y, box.max.z], [box.max.x, box.min.y, box.max.z]] },
-    { dir: [-1, 0, 0], corners: [[box.min.x, box.min.y, box.max.z], [box.min.x, box.max.y, box.max.z], [box.min.x, box.max.y, box.min.z], [box.min.x, box.min.y, box.min.z]] },
-    { dir: [0, 1, 0], corners: [[box.min.x, box.max.y, box.max.z], [box.max.x, box.max.y, box.max.z], [box.max.x, box.max.y, box.min.z], [box.min.x, box.max.y, box.min.z]] },
-    { dir: [0, -1, 0], corners: [[box.min.x, box.min.y, box.min.z], [box.max.x, box.min.y, box.min.z], [box.max.x, box.min.y, box.max.z], [box.min.x, box.min.y, box.max.z]] },
-    { dir: [0, 0, 1], corners: [[box.max.x, box.min.y, box.max.z], [box.max.x, box.max.y, box.max.z], [box.min.x, box.max.y, box.max.z], [box.min.x, box.min.y, box.max.z]] },
-    { dir: [0, 0, -1], corners: [[box.min.x, box.min.y, box.min.z], [box.min.x, box.max.y, box.min.z], [box.max.x, box.max.y, box.min.z], [box.max.x, box.min.y, box.min.z]] }
-  ];
-
-  for (const [key, id] of voxels) {
-    const [x, y, z] = key.split(",").map(Number);
-    const block = BLOCKS[id];
-    const tile = ATLAS_TILE[block.kind];
-    const margin = 0.018;
-    const u0 = tile.col / 3 + margin / 3;
-    const u1 = (tile.col + 1) / 3 - margin / 3;
-    const v0 = 1 - (tile.row + 1) / 2 + margin / 2;
-    const v1 = 1 - tile.row / 2 - margin / 2;
-    color.setHex(block.color);
-    for (const box of blockBoxes(id)) {
-      for (const face of faces(box)) {
-        const [dx, dy, dz] = face.dir;
-        const base = positions.length / 3;
-        for (let i = 0; i < face.corners.length; i++) {
-          const corner = face.corners[i];
-          const uv = faceUvs[i];
-          positions.push(x + corner[0], y + corner[1], z + corner[2]);
-          normals.push(dx, dy, dz);
-          colors.push(color.r, color.g, color.b);
-          uvs.push(uv[0] === 0 ? u0 : u1, uv[1] === 0 ? v0 : v1);
-        }
-        const materialIndex = block.kind === "rudder" ? 1 : 0;
-        const groupStart = indices.length;
-        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-        geometryGroups.push({ start: groupStart, count: 6, materialIndex });
-      }
-    }
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
-  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-  geometry.setIndex(indices);
-  for (const group of geometryGroups) geometry.addGroup(group.start, group.count, group.materialIndex);
-  geometry.computeBoundingSphere();
-  return geometry;
-}
-
-async function boot() {
-  await RAPIER.init();
-
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.shadowMap.enabled = true;
-  renderer.setClearColor(0x88c8df);
-  root.appendChild(renderer.domElement);
-
-  const scene = new THREE.Scene();
-  scene.fog = new THREE.FogExp2(0x88c8df, 0.018);
-
-  const camera = new THREE.PerspectiveCamera(72, window.innerWidth / window.innerHeight, 0.1, 900);
-  const controls = new PointerLockControls(camera, renderer.domElement);
-  camera.rotation.x = -0.28;
-  camera.position.set(0, 5, 10);
-  scene.add(controls.object);
-
-  const sun = new THREE.DirectionalLight(0xfff3c7, 3.2);
-  sun.position.set(-25, 45, 28);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  scene.add(sun);
-  scene.add(new THREE.HemisphereLight(0xbdeeff, 0x245066, 1.8));
-
-  const seaGeometry = new THREE.PlaneGeometry(2000, 2000, 160, 160);
-  const sea = new THREE.Mesh(
-    seaGeometry,
-    new THREE.MeshPhysicalMaterial({
-      map: waterTexture,
-      color: 0x2c8fbc,
-      roughness: 0.08,
-      metalness: 0,
-      transmission: 0.08,
-      thickness: 1.8,
-      transparent: true,
-      opacity: 0.72,
-      depthWrite: false,
-      emissive: 0x063a58,
-      emissiveIntensity: 0.16
-    })
-  );
-  sea.rotation.x = -Math.PI / 2;
-  sea.position.y = WATER_LEVEL;
-  sea.receiveShadow = true;
-  sea.renderOrder = 1;
-  scene.add(sea);
-
-  const caustics = new THREE.Mesh(
-    new THREE.PlaneGeometry(2000, 2000, 160, 160),
-    new THREE.MeshStandardMaterial({
-      map: waterCausticsTexture,
-      color: 0xb8fff2,
-      transparent: true,
-      opacity: 0.22,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      emissive: 0x83fff1,
-      emissiveIntensity: 0.45
-    })
-  );
-  caustics.rotation.x = -Math.PI / 2;
-  caustics.position.y = WATER_LEVEL + 0.012;
-  caustics.renderOrder = 2;
-  scene.add(caustics);
-
-  const physics = new RAPIER.World({ x: 0, y: -18, z: 0 });
-  const entities: VoxelEntity[] = [];
-
-  const playerBody = physics.createRigidBody(
-    RAPIER.RigidBodyDesc.dynamic().setTranslation(0, 4, 8).setCanSleep(false).setGravityScale(1.35)
-  );
-  physics.createCollider(RAPIER.ColliderDesc.capsule(0.85, 0.38).setFriction(0.1), playerBody);
-
-  const islandBody = physics.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(-10, -2, -12));
-  const island = new VoxelEntity("island", islandBody, physics, scene);
-  seedIsland(island);
-  entities.push(island);
-
-  const shipBody = physics.createRigidBody(
-    RAPIER.RigidBodyDesc.dynamic().setTranslation(0, 0.2, 1).setGravityScale(0).setLinearDamping(2.2).setAngularDamping(5)
-  );
-  const ship = new VoxelEntity("ship", shipBody, physics, scene);
-  seedShip(ship);
-  entities.push(ship);
-
-  const ghostMaterial = new THREE.MeshStandardMaterial({
-    color: 0xf7d36b,
-    transparent: true,
-    opacity: 0.36,
-    depthWrite: false,
-    roughness: 0.5
-  });
-  const ghost = new THREE.Mesh(new THREE.BufferGeometry(), ghostMaterial);
-  ghost.visible = false;
-  scene.add(ghost);
-
-  const keys = new Set<string>();
-  window.addEventListener("keydown", (event) => {
-    keys.add(event.code);
-    if (event.code === "Space" && !event.repeat) {
-      const now = performance.now();
-      if (now - lastSpaceTap < 320) {
-        flyMode = !flyMode;
-        playerBody.setGravityScale(flyMode ? 0 : 1.35, true);
-        playerBody.setLinvel({ x: playerBody.linvel().x, y: 0, z: playerBody.linvel().z }, true);
-        suppressNextJump = true;
-      }
-      lastSpaceTap = now;
-    }
-    if (event.code === "KeyR" && !event.repeat) {
-      rotateSelectedOrientation();
-    }
-    if (event.code === "KeyE" && !event.repeat) {
-      if (activeRudderShip) {
-        activeRudderShip = null;
-        activeShipYaw = null;
-        showToast("Left rudder");
-      } else {
-        const rudder = findUsableRudder(camera, [ship], playerBody);
-        if (rudder) {
-          activeRudderShip = rudder.ship;
-          activeRudderOrientation = rudder.orientation;
-          activeShipYaw = new THREE.Euler().setFromQuaternion(rudder.ship.group.quaternion, "YXZ").y;
-          shipAttachment = {
-            ship: rudder.ship,
-            localPosition: rudder.ship.worldToLocal(new THREE.Vector3(playerBody.translation().x, playerBody.translation().y, playerBody.translation().z)),
-            lastWorldPosition: new THREE.Vector3(playerBody.translation().x, playerBody.translation().y, playerBody.translation().z),
-            missingSince: null
-          };
-          playerBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
-          showToast("Rudder engaged");
-        } else {
-          showToast("Aim at the rudder and press E");
-        }
-      }
-    }
-    const digit = event.key === "0" ? 10 : Number(event.key);
-    if (event.key === "0") {
-      selectPaletteIndex(0);
-    } else if (digit >= 1 && digit < Math.min(PALETTE.length, 10)) {
-      selectPaletteIndex(digit);
-    }
-  });
-  window.addEventListener("keyup", (event) => keys.delete(event.code));
-  renderer.domElement.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    selectPaletteIndex(selectedIndex + (event.deltaY > 0 ? 1 : -1));
-  }, { passive: false });
-
-  renderer.domElement.addEventListener("click", () => controls.lock());
-  renderer.domElement.addEventListener("contextmenu", (event: MouseEvent) => event.preventDefault());
-  renderer.domElement.addEventListener("pointerdown", (event: PointerEvent) => {
-    if (!controls.isLocked) return;
-    const hit = raycastVoxels(camera, entities);
-    if (!hit) return;
-
-    const target = hit.entity.worldToLocalVoxel(hit.position.clone().addScaledVector(hit.normal, event.button === 2 ? 0.05 : -0.05));
-    if (event.button === 0) {
-      hit.entity.setBlock(target.x, target.y, target.z, null);
-    }
-    if (event.button === 2) {
-      const place = hit.entity.worldToLocalVoxel(hit.position.clone().addScaledVector(hit.normal, 0.55));
-      if (selectedBlock) hit.entity.setBlock(place.x, place.y, place.z, selectedBlock);
-    }
-  });
-
-  const clock = new THREE.Clock();
-  renderer.setAnimationLoop(() => {
-    const dt = Math.min(clock.getDelta(), 0.05);
-    const elapsed = clock.elapsedTime;
-    updateToast();
-    updateWater(sea, caustics, elapsed);
-    updatePlayer(dt, controls, playerBody, keys, flyMode, activeRudderShip !== null);
-    updateShip(ship, shipBody, playerBody, keys, elapsed, activeRudderShip === ship);
-    physics.step();
-
-    for (const entity of entities) entity.syncFromPhysics();
-    updateShipAttachment(playerBody, ship, elapsed, activeRudderShip !== null);
-    updateCamera(controls, playerBody, activeRudderShip, activeRudderOrientation);
-    const p = playerBody.translation();
-    sea.position.x = p.x;
-    sea.position.z = p.z;
-    caustics.position.x = p.x;
-    caustics.position.z = p.z;
-    updateGhost(ghost, camera, entities);
-
-    renderer.render(scene, camera);
-  });
-
-  window.addEventListener("resize", () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
-}
-
-function seedIsland(entity: VoxelEntity) {
-  for (let x = -7; x <= 7; x++) {
-    for (let z = -6; z <= 6; z++) {
-      const d = Math.sqrt((x / 7) ** 2 + (z / 6) ** 2);
-      if (d > 1) continue;
-      const h = Math.max(1, Math.floor(4 - d * 3));
-      for (let y = 0; y < h; y++) {
-        entity.voxels.set(`${x},${y},${z}`, y === h - 1 ? "sand_block" : y < 1 ? "stone_block" : "dirt_block");
-      }
-    }
-  }
-  for (let y = 3; y < 8; y++) entity.voxels.set(`2,${y},-1`, "wood_trunk_block");
-  for (let x = -1; x <= 5; x++) {
-    for (let y = 7; y <= 9; y++) {
-      for (let z = -4; z <= 2; z++) {
-        if (Math.abs(x - 2) + Math.abs(y - 8) + Math.abs(z + 1) < 6) entity.voxels.set(`${x},${y},${z}`, "foliage_block");
-      }
-    }
-  }
-  entity.rebuild();
-}
-
-function seedShip(entity: VoxelEntity) {
-  for (let x = -4; x <= 4; x++) {
-    for (let z = -9; z <= 9; z++) {
-      const beam = 3 - Math.floor(Math.abs(z) / 4);
-      if (Math.abs(x) <= beam) entity.voxels.set(`${x},0,${z}`, "wood_plank_block");
-      if (Math.abs(x) === beam && beam > 0) entity.voxels.set(`${x},1,${z}`, x < 0 ? "wood_plank_side_wall_west" : "wood_plank_side_wall_east");
-    }
-  }
-  for (let y = 1; y <= 7; y++) entity.voxels.set(`0,${y},0`, "wood_trunk_block");
-  for (let x = -3; x <= 3; x++) {
-    for (let y = 3; y <= 5; y++) entity.voxels.set(`${x},${y},1`, "foliage_block");
-  }
-  entity.voxels.set(`0,1,-7`, "wood_plank_stairs_north");
-  entity.voxels.set(`0,1,7`, "wood_plank_stairs_south");
-  entity.voxels.set(`0,1,9`, "rudder_block_south");
-  entity.voxels.set(`0,2,9`, "wood_plank_center_wall");
-  entity.rebuild();
-}
-
-function updateWater(sea: THREE.Mesh, caustics: THREE.Mesh, elapsed: number) {
-  const worldAnchorX = sea.position.x / 2000;
-  const worldAnchorZ = sea.position.z / 2000;
-  waterTexture.offset.x = worldAnchorX + elapsed * 0.01;
-  waterTexture.offset.y = worldAnchorZ + elapsed * 0.006;
-  waterCausticsTexture.offset.x = worldAnchorX * 0.55 - elapsed * 0.006;
-  waterCausticsTexture.offset.y = worldAnchorZ * 0.55 + elapsed * 0.004;
-  for (const mesh of [sea, caustics]) {
-    const position = mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
-    for (let i = 0; i < position.count; i++) {
-      const x = position.getX(i) + mesh.position.x;
-      const y = position.getY(i) + mesh.position.z;
-      const wave =
-        Math.sin(x * 0.032 + elapsed * 1.25) * 0.01 +
-        Math.cos(y * 0.025 + elapsed * 0.9) * 0.007;
-      position.setZ(i, wave);
-    }
-    position.needsUpdate = true;
-    mesh.geometry.computeVertexNormals();
-  }
-}
-
-function updateGhost(ghost: THREE.Mesh, camera: THREE.Camera, entities: VoxelEntity[]) {
-  if (!selectedBlock) {
-    ghost.visible = false;
-    return;
-  }
-  const hit = raycastVoxels(camera, entities);
-  if (!hit) {
-    ghost.visible = false;
-    return;
-  }
-  const place = hit.entity.worldToLocalVoxel(hit.position.clone().addScaledVector(hit.normal, 0.55));
-  ghost.geometry.dispose();
-  ghost.geometry = buildVoxelGeometry(new Map([["0,0,0", selectedBlock]]));
-  ghost.position.copy(hit.entity.group.localToWorld(new THREE.Vector3(place.x, place.y, place.z)));
-  ghost.quaternion.copy(hit.entity.group.quaternion);
-  ghost.visible = true;
-}
-
-function findUsableRudder(camera: THREE.Camera, ships: VoxelEntity[], playerBody: RAPIER.RigidBody) {
-  const hit = raycastVoxels(camera, ships);
-  if (hit) {
-    const id = hit.entity.getBlock(hit.voxel.x, hit.voxel.y, hit.voxel.z);
-    if (id && BLOCKS[id].kind === "rudder") return { ship: hit.entity, orientation: BLOCKS[id].orientation ?? "south" };
-  }
-
-  const player = playerBody.translation();
-  const playerWorld = new THREE.Vector3(player.x, player.y, player.z);
-  for (const ship of ships) {
-    let best: { ship: VoxelEntity; orientation: Orientation; distance: number } | null = null;
-    for (const [key, id] of ship.voxels) {
-      const block = BLOCKS[id];
-      if (block.kind !== "rudder") continue;
-      const [x, y, z] = key.split(",").map(Number);
-      const world = ship.localVoxelCenterToWorld(new THREE.Vector3(x, y, z));
-      const distance = world.distanceTo(playerWorld);
-      if (distance < 4.2 && (!best || distance < best.distance)) {
-        best = { ship, orientation: block.orientation ?? "south", distance };
-      }
-    }
-    if (best) return best;
-  }
+function blockTextureKey(block: string) {
+  if (block.includes("stone")) return "stone";
+  if (block.includes("dirt")) return "dirt";
+  if (block.includes("sand")) return "sand";
+  if (block.includes("trunk") || block.includes("mast")) return "wood_trunk";
+  if (block.includes("foliage")) return "foliage";
+  if (block.includes("plank") || block.includes("beam") || block.includes("bollard") || block.includes("keel")) return "wood_plank";
+  if (block.includes("rudder")) return "rudder";
   return null;
 }
 
-function orientationVector(orientation: Orientation) {
-  if (orientation === "north") return new THREE.Vector3(0, 0, -1);
-  if (orientation === "east") return new THREE.Vector3(1, 0, 0);
-  if (orientation === "south") return new THREE.Vector3(0, 0, 1);
-  return new THREE.Vector3(-1, 0, 0);
-}
+function blockMaterial(block: string) {
+  const textureKey = blockTextureKey(block);
+  const cacheKey = textureKey ?? `color:${block}`;
+  const cached = blockMaterialCache.get(cacheKey);
+  if (cached) return cached;
 
-function getShipTopSupport(ship: VoxelEntity, worldPosition: THREE.Vector3) {
-  const local = ship.worldToLocal(worldPosition);
-  const footY = local.y - PLAYER_FOOT_OFFSET;
-  let bestTop = -Infinity;
-  let found = false;
-
-  for (const [key, id] of ship.voxels) {
-    const [x, y, z] = key.split(",").map(Number);
-    for (const box of blockBoxes(id)) {
-      const minX = x + box.min.x - 0.08;
-      const maxX = x + box.max.x + 0.08;
-      const minZ = z + box.min.z - 0.08;
-      const maxZ = z + box.max.z + 0.08;
-      const top = y + box.max.y;
-      if (local.x < minX || local.x > maxX || local.z < minZ || local.z > maxZ) continue;
-      if (top <= footY + 0.18 && top > bestTop) {
-        bestTop = top;
-        found = true;
-      }
-    }
-  }
-
-  return found ? bestTop : null;
-}
-
-function updateShipAttachment(playerBody: RAPIER.RigidBody, ship: VoxelEntity, elapsed: number, isDrivingShip: boolean) {
-  const p = playerBody.translation();
-  let playerWorld = new THREE.Vector3(p.x, p.y, p.z);
-
-  if (shipAttachment?.ship === ship) {
-    const carried = ship.localToWorld(shipAttachment.localPosition);
-    if (isDrivingShip) {
-      playerWorld = carried;
-      playerBody.setTranslation({ x: carried.x, y: carried.y, z: carried.z }, true);
-    } else {
-      const delta = carried.clone().sub(shipAttachment.lastWorldPosition);
-      delta.y = 0;
-      if (delta.lengthSq() < 9) {
-        playerWorld.add(delta);
-        playerBody.setTranslation({ x: playerWorld.x, y: playerWorld.y, z: playerWorld.z }, true);
-      }
-    }
-  }
-
-  const topBelow = getShipTopSupport(ship, playerWorld);
-
-  if (topBelow !== null) {
-    shipAttachment = {
-      ship,
-      localPosition: ship.worldToLocal(playerWorld),
-      lastWorldPosition: playerWorld.clone(),
-      missingSince: null
-    };
-    return;
-  }
-
-  if (!shipAttachment || shipAttachment.ship !== ship) return;
-  if (shipAttachment.missingSince === null) shipAttachment.missingSince = elapsed;
-  if (!isDrivingShip && elapsed - shipAttachment.missingSince > 1) {
-    shipAttachment = null;
-    return;
-  }
-
-  const carried = ship.localToWorld(shipAttachment.localPosition);
-  if (isDrivingShip) {
-    playerBody.setTranslation({ x: carried.x, y: carried.y, z: carried.z }, true);
-    shipAttachment.lastWorldPosition = carried.clone();
+  let material: THREE.MeshStandardMaterial;
+  if (textureKey === "rudder") {
+    material = new THREE.MeshStandardMaterial({
+      map: rudderTexture,
+      color: 0xffffff,
+      roughness: 0.86,
+      metalness: 0.03
+    });
+  } else if (textureKey && atlasTiles[textureKey]) {
+    material = new THREE.MeshStandardMaterial({
+      map: createAtlasTileTexture(atlasTiles[textureKey]),
+      color: 0xffffff,
+      roughness: 0.88,
+      metalness: 0.02
+    });
   } else {
-    shipAttachment.lastWorldPosition = playerWorld.clone();
-  }
-}
-
-function updateCamera(
-  controls: PointerLockControls,
-  playerBody: RAPIER.RigidBody,
-  ship: VoxelEntity | null,
-  rudderOrientation: Orientation
-) {
-  if (!ship) {
-    const p = playerBody.translation();
-    controls.object.position.set(p.x, p.y + 0.75, p.z);
-    return;
+    material = new THREE.MeshStandardMaterial({
+      color: blockColor(block),
+      roughness: 0.9,
+      metalness: 0.02
+    });
   }
 
-  const rudderOut = orientationVector(rudderOrientation).applyQuaternion(ship.group.quaternion).normalize();
-  const shipCenter = ship.group.localToWorld(new THREE.Vector3(0, 1.3, 0));
-  const cameraPosition = shipCenter.clone().addScaledVector(rudderOut, 16).add(new THREE.Vector3(0, 7, 0));
-  const lookAt = shipCenter.clone().addScaledVector(rudderOut, -4).add(new THREE.Vector3(0, 1.6, 0));
-  controls.object.position.copy(cameraPosition);
-  controls.object.lookAt(lookAt);
+  blockMaterialCache.set(cacheKey, material);
+  return material;
 }
 
-function raycastVoxels(camera: THREE.Camera, entities: VoxelEntity[]): VoxelHit | null {
-  const origin = new THREE.Vector3();
-  const direction = new THREE.Vector3();
-  camera.getWorldPosition(origin);
-  camera.getWorldDirection(direction);
+function vecToString(v: { x: number; y: number; z: number }, digits = 2) {
+  return `${v.x.toFixed(digits)}, ${v.y.toFixed(digits)}, ${v.z.toFixed(digits)}`;
+}
 
-  let best: VoxelHit | null = null;
-  let bestDistance = Infinity;
+function quatToString(v: { x: number; y: number; z: number; w: number }, digits = 2) {
+  return `${v.x.toFixed(digits)}, ${v.y.toFixed(digits)}, ${v.z.toFixed(digits)}, ${v.w.toFixed(digits)}`;
+}
 
-  for (const entity of entities) {
-    const inverseMatrix = entity.group.matrixWorld.clone().invert();
-    const localOrigin = origin.clone().applyMatrix4(inverseMatrix);
-    const localDirection = direction.clone().transformDirection(inverseMatrix).normalize();
-    const ray = new THREE.Ray(localOrigin, localDirection);
-    for (const [key, id] of entity.voxels) {
-      const [x, y, z] = key.split(",").map(Number);
-      for (const shapeBox of blockBoxes(id)) {
-        const box = new THREE.Box3(
-          new THREE.Vector3(x + shapeBox.min.x, y + shapeBox.min.y, z + shapeBox.min.z),
-          new THREE.Vector3(x + shapeBox.max.x, y + shapeBox.max.y, z + shapeBox.max.z)
-        );
-        const localHit = new THREE.Vector3();
-        if (!ray.intersectBox(box, localHit)) continue;
-        const worldHit = entity.group.localToWorld(localHit.clone());
-        const distance = origin.distanceTo(worldHit);
-        if (distance > 8 || distance >= bestDistance) continue;
-        const normal = localHit.clone().sub(box.getCenter(new THREE.Vector3()));
-        const axis = Math.max(Math.abs(normal.x), Math.abs(normal.y), Math.abs(normal.z));
-        normal.set(
-          Math.abs(normal.x) === axis ? Math.sign(normal.x) : 0,
-          Math.abs(normal.y) === axis ? Math.sign(normal.y) : 0,
-          Math.abs(normal.z) === axis ? Math.sign(normal.z) : 0
-        );
-        best = {
-          entity,
-          voxel: new THREE.Vector3(x, y, z),
-          position: worldHit,
-          normal: normal.transformDirection(entity.group.matrixWorld).normalize()
-        };
-        bestDistance = distance;
-      }
+function createVoxelMesh(voxel: VoxelCell) {
+  const material = blockMaterial(voxel.value);
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), material);
+  mesh.position.set(voxel.x + 0.5, voxel.y + 0.5, voxel.z + 0.5);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function createEntityView(id: EntityId) {
+  const entity = engine.getEntity(id);
+  if (!entity) return;
+  const view: EntityView = { group: new THREE.Group(), voxelCount: -1 };
+  view.group.name = `entity-${id}`;
+  scene.add(view.group);
+  entityViews.set(id, view);
+  syncEntityView(id);
+}
+
+function syncEntityView(id: EntityId) {
+  const entity = engine.getEntity(id);
+  const view = entityViews.get(id);
+  if (!entity || !view) return;
+
+  if (entity.kind === "voxel") {
+    const voxelCount = entity.voxels?.size ?? 0;
+    if (view.voxelCount !== voxelCount) {
+      clearGroup(view.group);
+      for (const voxel of entity.voxels?.values() ?? []) view.group.add(createVoxelMesh(voxel));
+      view.voxelCount = voxelCount;
     }
   }
 
-  return best;
+  const world = engine.getIntrospection(id).worldTransform;
+  view.group.position.set(world.position.x, world.position.y, world.position.z);
+  view.group.quaternion.set(world.rotation.x, world.rotation.y, world.rotation.z, world.rotation.w);
+  view.group.scale.set(world.scale.x, world.scale.y, world.scale.z);
 }
 
-function updatePlayer(
-  dt: number,
-  controls: PointerLockControls,
-  body: RAPIER.RigidBody,
-  keys: Set<string>,
-  isFlying: boolean,
-  isDrivingShip: boolean
-) {
-  if (isDrivingShip) {
-    body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-    body.setGravityScale(0, true);
-    return;
-  }
-
-  const forward = new THREE.Vector3();
-  controls.object.getWorldDirection(forward);
-  const flatForward = forward.clone();
-  flatForward.y = 0;
-  flatForward.normalize();
-  const right = new THREE.Vector3().crossVectors(flatForward, new THREE.Vector3(0, 1, 0)).normalize();
-  const wish = new THREE.Vector3();
-
-  if (keys.has("KeyW")) wish.add(isFlying ? forward : flatForward);
-  if (keys.has("KeyS")) wish.sub(isFlying ? forward : flatForward);
-  if (keys.has("KeyD")) wish.add(right);
-  if (keys.has("KeyA")) wish.sub(right);
-  const position = body.translation();
-  const isSwimming = !isFlying && position.y < WATER_LEVEL + 0.8;
-  if ((isFlying || isSwimming) && keys.has("Space")) wish.y += 1;
-  if ((isFlying || isSwimming) && keys.has("ControlLeft")) wish.y -= 1;
-  if (wish.lengthSq() > 0) wish.normalize();
-
-  if (!isFlying && position.y < WATER_LEVEL - 1.25 && !keys.has("ControlLeft")) {
-    body.setTranslation({ x: position.x, y: WATER_LEVEL - 1.25, z: position.z }, true);
-  }
-
-  body.setGravityScale(isFlying ? 0 : isSwimming ? 0.22 : 1.35, true);
-  const velocity = body.linvel();
-  const speed = keys.has("ShiftLeft") ? 9 : isSwimming ? 3.5 : 5.5;
-  const swimBuoyancy = isSwimming ? Math.min(1.4, (WATER_LEVEL + 0.25 - position.y) * 1.8) : 0;
-  const nextY = isFlying ? wish.y * speed : isSwimming ? wish.y * speed + swimBuoyancy : velocity.y;
-  body.setLinvel({ x: wish.x * speed, y: nextY, z: wish.z * speed }, true);
-  if (!isFlying && !isSwimming && keys.has("Space") && Math.abs(velocity.y) < 0.08 && !suppressNextJump) {
-    body.applyImpulse({ x: 0, y: 6.5 * dt * 60, z: 0 }, true);
-  }
-  suppressNextJump = false;
+function setSelectedEntity(id: EntityId) {
+  if (!engine.getEntity(id)) return;
+  selectedEntityId = id;
+  renderEntityList();
 }
 
-function updateShip(
-  ship: VoxelEntity,
-  body: RAPIER.RigidBody,
-  playerBody: RAPIER.RigidBody,
-  keys: Set<string>,
-  elapsed: number,
-  isRudderActive: boolean
-) {
-  const translation = body.translation();
-  const bob = Math.sin(elapsed * 1.2 + translation.x * 0.07 + translation.z * 0.04) * 0.035;
-  const currentRotation = new THREE.Quaternion(body.rotation().x, body.rotation().y, body.rotation().z, body.rotation().w);
-  let yaw = activeShipYaw ?? new THREE.Euler().setFromQuaternion(currentRotation, "YXZ").y;
-  if (isRudderActive) {
-    const turn = (keys.has("KeyA") || keys.has("KeyQ") ? 1 : 0) + (keys.has("KeyD") ? -1 : 0);
-    yaw += turn * 1.65 * (1 / 60);
-    activeShipYaw = yaw;
-  }
-  const levelRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw, 0, "YXZ"));
-  body.setRotation({ x: levelRotation.x, y: levelRotation.y, z: levelRotation.z, w: levelRotation.w }, true);
-  body.setTranslation({ x: translation.x, y: WATER_LEVEL + 0.18 + bob, z: translation.z }, true);
-  body.setLinvel({ x: body.linvel().x, y: 0, z: body.linvel().z }, true);
-  body.setAngvel({ x: 0, y: body.angvel().y, z: 0 }, true);
-  if (!isRudderActive) return;
+function renderEntityList() {
+  if (!entityListEl) return;
+  entityListEl.innerHTML = engine
+    .listEntities()
+    .map((entity) => {
+      const active = entity.id === selectedEntityId ? "active" : "";
+      const parent = entity.parentId ?? "none";
+      return `<button class="slot ${active}" data-entity="${entity.id}">
+        <span class="swatch" style="background:#${entity.kind === "voxel" ? "8fb1c6" : "d6c67a"}"></span>
+        <span>${entity.name} | ${parent}</span>
+      </button>`;
+    })
+    .join("");
+  entityListEl.querySelectorAll<HTMLButtonElement>("[data-entity]").forEach((button) => {
+    button.addEventListener("click", () => setSelectedEntity(button.dataset.entity ?? selectedEntityId));
+  });
+}
 
-  const player = playerBody.translation();
-  const rudder = ship.nearestBlockKindWorldPosition("rudder", new THREE.Vector3(player.x, player.y, player.z));
-  if (!rudder || rudder.distanceTo(new THREE.Vector3(player.x, player.y, player.z)) > 4.5) {
-    activeRudderShip = null;
-    activeShipYaw = null;
-    return;
-  }
-  const rudderOut = orientationVector(activeRudderOrientation).applyQuaternion(levelRotation).normalize();
-  const forward = rudderOut.multiplyScalar(-1);
-  const throttle = (keys.has("KeyW") || keys.has("ShiftLeft") ? 1 : 0) + (keys.has("KeyS") ? -0.45 : 0);
-  const speed = keys.has("ShiftLeft") ? 6 : 3.2;
-  const desired = forward.multiplyScalar(throttle * speed);
-  const current = body.linvel();
-  body.setLinvel(
-    {
-      x: THREE.MathUtils.lerp(current.x, desired.x, 0.08),
-      y: 0,
-      z: THREE.MathUtils.lerp(current.z, desired.z, 0.08)
-    },
-    true
+let buildToolbarViewportEl: HTMLDivElement | null = null;
+let buildToolbarTrackEl: HTMLDivElement | null = null;
+let buildToolbarLeftEl: HTMLButtonElement | null = null;
+let buildToolbarRightEl: HTMLButtonElement | null = null;
+
+function syncBuildToolbarSelection() {
+  if (!buildToolbarTrackEl) return;
+  const buttons = Array.from(buildToolbarTrackEl.querySelectorAll<HTMLButtonElement>("[data-tool-index]"));
+  buttons.forEach((button) => {
+    const index = Number(button.dataset.toolIndex);
+    button.classList.toggle("active", index === blockPlacement.selectionIndex);
+  });
+
+  const activeButton = buildToolbarTrackEl.querySelector<HTMLButtonElement>(`[data-tool-index="${blockPlacement.selectionIndex}"]`);
+  activeButton?.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+  updateBuildToolbarOverflow();
+  updateInfoPanel();
+}
+
+function updateBuildToolbarOverflow() {
+  if (!buildToolbarViewportEl || !buildToolbarLeftEl || !buildToolbarRightEl) return;
+  const canScrollLeft = buildToolbarViewportEl.scrollLeft > 2;
+  const canScrollRight = buildToolbarViewportEl.scrollLeft + buildToolbarViewportEl.clientWidth < buildToolbarViewportEl.scrollWidth - 2;
+  buildToolbarLeftEl.classList.toggle("visible", canScrollLeft);
+  buildToolbarRightEl.classList.toggle("visible", canScrollRight);
+}
+
+function renderBuildToolbar() {
+  if (!blockToolbarEl) return;
+  blockToolbarEl.innerHTML = `
+    <button class="toolbar-arrow toolbar-arrow--left" type="button" aria-label="Scroll blocks left">◀</button>
+    <div class="block-toolbar__viewport">
+      <div class="block-toolbar__track"></div>
+    </div>
+    <button class="toolbar-arrow toolbar-arrow--right" type="button" aria-label="Scroll blocks right">▶</button>
+  `;
+  buildToolbarViewportEl = blockToolbarEl.querySelector<HTMLDivElement>(".block-toolbar__viewport");
+  buildToolbarTrackEl = blockToolbarEl.querySelector<HTMLDivElement>(".block-toolbar__track");
+  buildToolbarLeftEl = blockToolbarEl.querySelector<HTMLButtonElement>(".toolbar-arrow--left");
+  buildToolbarRightEl = blockToolbarEl.querySelector<HTMLButtonElement>(".toolbar-arrow--right");
+  if (!buildToolbarTrackEl || !buildToolbarViewportEl || !buildToolbarLeftEl || !buildToolbarRightEl) return;
+
+  buildToolbarTrackEl.innerHTML = blockPlacement.entries
+    .map((entry, index) => {
+      const active = index === blockPlacement.selectionIndex ? "active" : "";
+      return `
+        <button class="block-slot ${active}" type="button" data-tool-index="${index}">
+          <span class="swatch">${entry.icon}</span>
+          <span class="slot-name">${index === 0 ? "Empty Hand" : entry.name}</span>
+        </button>
+      `;
+    })
+    .join("");
+
+  buildToolbarTrackEl.querySelectorAll<HTMLButtonElement>("[data-tool-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      blockPlacement.selectIndex(Number(button.dataset.toolIndex));
+      syncBuildToolbarSelection();
+    });
+  });
+
+  buildToolbarLeftEl.addEventListener("click", () => {
+    buildToolbarViewportEl?.scrollBy({ left: -240, behavior: "smooth" });
+  });
+  buildToolbarRightEl.addEventListener("click", () => {
+    buildToolbarViewportEl?.scrollBy({ left: 240, behavior: "smooth" });
+  });
+
+  buildToolbarViewportEl.addEventListener("scroll", updateBuildToolbarOverflow);
+  window.addEventListener("resize", updateBuildToolbarOverflow);
+  updateBuildToolbarOverflow();
+}
+
+function updateInfoPanel(cursorBlockId: string | null = null) {
+  const selected = engine.getIntrospection(selectedEntityId);
+  const parent = selected.parentId ?? "world";
+  const env = engine.getEnvironment();
+  const globalDebug = engine.getGlobalDebug();
+  const activeTool = blockPlacement.selectedTool;
+  const activeBlock = blockPlacement.selectedBlock;
+  const toolLabel = blockPlacement.selectionIndex === 0 ? "Empty Hand" : activeTool.name;
+  const cursorBlockLabel = cursorBlockId
+    ? (blockRegistry.getBlock(cursorBlockId)?.name ?? cursorBlockId)
+    : "none";
+  infoEl!.textContent = [
+    `selected: ${selected.name} (${selected.kind})`,
+    `parent: ${parent}`,
+    `physics: ${selected.physics} | collides: ${selected.collides ? "yes" : "no"}`,
+    `cursor block: ${cursorBlockLabel}`,
+    `tool: ${toolLabel}`,
+    `block: ${activeBlock ? activeBlock.name : "none"}`,
+    `rotation: ${(blockPlacement.getRotationTurns() * 90) % 360}deg`,
+    `local pos: ${vecToString(selected.localTransform.position)}`,
+    `local rot: ${quatToString(selected.localTransform.rotation)}`,
+    `world pos: ${vecToString(selected.worldTransform.position)}`,
+    `world vel: ${vecToString(selected.worldVelocity)}`,
+    `local vel: ${vecToString(selected.localVelocity)}`,
+    `gravity: ${vecToString(env.gravity)}`,
+    `wind: ${vecToString(env.wind)}`,
+    `voxel count: ${selected.voxelCount}`
+  ].join("\n");
+
+  const net = selected.forces.reduce(
+    (sum, force) => ({
+      x: sum.x + force.vector.x,
+      y: sum.y + force.vector.y,
+      z: sum.z + force.vector.z
+    }),
+    { x: 0, y: 0, z: 0 }
   );
-  body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  const forceLines = selected.forces.length
+    ? selected.forces.map((force) => `${force.label}: ${vecToString(force.vector)} @ ${vecToString(force.source)}`)
+    : ["No forces applied to selected entity."];
+  forcesEl!.textContent = [
+    `Forces for ${selected.name}`,
+    `global forces vectors: ${globalDebug.forces ? "on" : "off"}`,
+    `global velocity vectors: ${globalDebug.velocity ? "on" : "off"}`,
+    `environment gravity: ${vecToString(env.gravity)}`,
+    `environment wind: ${vecToString(env.wind)}`,
+    ...forceLines,
+    `net: ${vecToString(net)}`
+  ].join("\n");
 }
 
-boot().catch((error) => {
-  console.error(error);
-  root.innerHTML = `<pre>${String(error)}</pre>`;
+function reparentEntityPreserveWorld(id: EntityId, parentId: EntityId | null) {
+  const entity = engine.getEntity(id);
+  const parent = parentId ? engine.getEntity(parentId) : engine.getEntity(engine.rootId);
+  if (!entity || !parent) return;
+  const world = engine.getIntrospection(id).worldTransform;
+  const parentWorld = engine.getIntrospection(parent.id).worldTransform;
+  const worldPos = new THREE.Vector3(world.position.x, world.position.y, world.position.z);
+  const parentPos = new THREE.Vector3(parentWorld.position.x, parentWorld.position.y, parentWorld.position.z);
+  const parentQuat = new THREE.Quaternion(parentWorld.rotation.x, parentWorld.rotation.y, parentWorld.rotation.z, parentWorld.rotation.w);
+  const localPos = worldPos.clone().sub(parentPos).applyQuaternion(parentQuat.clone().invert());
+  engine.setParent(id, parentId);
+  engine.patchEntity(id, {
+    transform: {
+      position: { x: localPos.x, y: localPos.y, z: localPos.z }
+    }
+  });
+}
+
+function cycleSelectedEntity() {
+  const entities = engine.listEntities().filter((entity) => entity.id !== engine.rootId);
+  const index = entities.findIndex((entity) => entity.id === selectedEntityId);
+  const next = entities[(index + 1) % entities.length];
+  if (next) setSelectedEntity(next.id);
+}
+
+function updateToolbarLabels() {
+  const gravityButton = toolbarEl?.querySelector<HTMLButtonElement>("[data-action='toggle-gravity']");
+  const windButton = toolbarEl?.querySelector<HTMLButtonElement>("[data-action='toggle-wind']");
+  const selected = engine.getEntity(selectedEntityId);
+  const globalDebug = engine.getGlobalDebug();
+  if (gravityButton) {
+    gravityButton.textContent = engine.getEnvironment().gravity.y === 0 ? "Gravity Off" : "Gravity On";
+  }
+  if (windButton) {
+    windButton.textContent = engine.getEnvironment().wind.x === 0 && engine.getEnvironment().wind.z === 0 ? "Wind Off" : "Wind On";
+  }
+  const forceButton = toolbarEl?.querySelector<HTMLButtonElement>("[data-action='global-forces']");
+  const velocityButton = toolbarEl?.querySelector<HTMLButtonElement>("[data-action='global-velocity']");
+  const gravityButtonState = toolbarEl?.querySelector<HTMLButtonElement>("[data-action='toggle-gravity']");
+  const selForceButton = toolbarEl?.querySelector<HTMLButtonElement>("[data-action='debug-selected-forces']");
+  const selVelocityButton = toolbarEl?.querySelector<HTMLButtonElement>("[data-action='debug-selected-velocity']");
+  if (forceButton) forceButton.textContent = globalDebug.forces ? "Hide Force Vectors" : "Show Force Vectors";
+  if (velocityButton) velocityButton.textContent = globalDebug.velocity ? "Hide Velocity Vectors" : "Show Velocity Vectors";
+  if (gravityButtonState) gravityButtonState.textContent = gravityEnabled ? "Gravity On" : "Gravity Off";
+  if (selForceButton) selForceButton.textContent = selected?.debug.forces ? "Sel Forces On" : "Sel Forces Off";
+  if (selVelocityButton) selVelocityButton.textContent = selected?.debug.velocity ? "Sel Velocity On" : "Sel Velocity Off";
+}
+
+function setEnvironmentGravity(enabled: boolean) {
+  gravityEnabled = enabled;
+  engine.setEnvironment({ gravity: { x: 0, y: 0, z: 0 } });
+  updateToolbarLabels();
+}
+
+function setEnvironmentWind(enabled: boolean) {
+  engine.setEnvironment({ wind: enabled ? { x: 0.7, y: 0, z: 0.25 } : { x: 0, y: 0, z: 0 } });
+  updateToolbarLabels();
+}
+
+const shipTemplate = createBoatTemplate();
+const catamaranTemplate = createCatamaranTemplate();
+const penicheTemplate = createPenicheTemplate();
+const islandTemplate = createIslandTemplate();
+
+engine.createEntity({
+  id: "island",
+  name: islandTemplate.name,
+  kind: "voxel",
+  physics: "static",
+  collides: true,
+  parentId: engine.rootId,
+  transform: {
+    position: { x: islandTemplate.position[0], y: islandTemplate.position[1], z: islandTemplate.position[2] },
+    rotation: { x: islandTemplate.rotation[0], y: islandTemplate.rotation[1], z: islandTemplate.rotation[2], w: islandTemplate.rotation[3] }
+  },
+  voxels: templateVoxels(islandTemplate.voxels)
 });
+
+engine.createEntity({
+  id: "ship",
+  name: shipTemplate.name,
+  kind: "voxel",
+  physics: "dynamic",
+  collides: true,
+  parentId: engine.rootId,
+  transform: {
+    position: { x: shipTemplate.position[0], y: shipTemplate.position[1], z: shipTemplate.position[2] },
+    rotation: { x: shipTemplate.rotation[0], y: shipTemplate.rotation[1], z: shipTemplate.rotation[2], w: shipTemplate.rotation[3] }
+  },
+  voxels: templateVoxels(shipTemplate.voxels),
+  debug: { forces: true, velocity: true }
+});
+
+engine.createEntity({
+  id: "catamaran",
+  name: catamaranTemplate.name,
+  kind: "voxel",
+  physics: "dynamic",
+  collides: true,
+  parentId: engine.rootId,
+  transform: {
+    position: { x: catamaranTemplate.position[0], y: catamaranTemplate.position[1], z: catamaranTemplate.position[2] },
+    rotation: {
+      x: catamaranTemplate.rotation[0],
+      y: catamaranTemplate.rotation[1],
+      z: catamaranTemplate.rotation[2],
+      w: catamaranTemplate.rotation[3]
+    }
+  },
+  voxels: templateVoxels(catamaranTemplate.voxels)
+});
+
+engine.createEntity({
+  id: "peniche",
+  name: penicheTemplate.name,
+  kind: "voxel",
+  physics: "dynamic",
+  collides: true,
+  parentId: engine.rootId,
+  transform: {
+    position: { x: penicheTemplate.position[0], y: penicheTemplate.position[1], z: penicheTemplate.position[2] },
+    rotation: {
+      x: penicheTemplate.rotation[0],
+      y: penicheTemplate.rotation[1],
+      z: penicheTemplate.rotation[2],
+      w: penicheTemplate.rotation[3]
+    }
+  },
+  voxels: templateVoxels(penicheTemplate.voxels)
+});
+
+engine.createEntity({
+  id: "player",
+  name: "player",
+  kind: "generic",
+  physics: "dynamic",
+  collides: false,
+  parentId: "island",
+  transform: {
+    position: { x: 10, y: 7, z: -1 },
+    rotation: { x: 0, y: 0, z: 0, w: 1 }
+  },
+  debug: { velocity: true }
+});
+
+createEntityView("island");
+createEntityView("ship");
+createEntityView("catamaran");
+createEntityView("peniche");
+createEntityView("player");
+renderEntityList();
+setSelectedEntity("ship");
+renderBuildToolbar();
+
+if (!toolbarEl) throw new Error("Missing toolbar panel");
+  toolbarEl.innerHTML = `
+  <button data-action="global-forces">Show Force Vectors</button>
+  <button data-action="global-velocity">Show Velocity Vectors</button>
+  <button data-action="toggle-gravity">Gravity Off</button>
+  <button data-action="toggle-wind">Wind Off</button>
+  <button data-action="attach-world">Parent World</button>
+  <button data-action="attach-ship">Parent Ship</button>
+  <button data-action="attach-island">Parent Island</button>
+  <button data-action="debug-selected-forces">Sel Forces Off</button>
+  <button data-action="debug-selected-velocity">Sel Velocity On</button>
+  <button data-action="cycle-selected">Cycle Entity</button>
+`;
+const toolbarButtons = Array.from(toolbarEl.querySelectorAll<HTMLButtonElement>("button"));
+
+document.addEventListener("keydown", (event) => {
+  keys.add(event.code);
+  if (event.code === "KeyC" && !event.repeat) cycleSelectedEntity();
+  if (event.code === "KeyR" && !event.repeat) {
+    blockPlacement.rotateSelection();
+    syncBuildToolbarSelection();
+  }
+  if (event.key === "0") {
+    blockPlacement.selectIndex(0);
+    syncBuildToolbarSelection();
+  }
+  if (/^[1-9]$/.test(event.key)) {
+    const index = Number(event.key);
+    if (index < blockPlacement.entries.length) {
+      blockPlacement.selectIndex(index);
+      syncBuildToolbarSelection();
+    }
+  }
+  setMovementState(event, true);
+  if (["Space", "ControlLeft", "KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) event.preventDefault();
+});
+
+document.addEventListener("keyup", (event) => {
+  keys.delete(event.code);
+  setMovementState(event, false);
+  if (["Space", "ControlLeft", "KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) event.preventDefault();
+});
+
+window.addEventListener("mousemove", (event) => {
+  if (!controls.isLocked && !draggingLook) return;
+  cameraYaw -= event.movementX * 0.0022;
+  cameraPitch = THREE.MathUtils.clamp(cameraPitch - event.movementY * 0.0022, -1.45, 1.2);
+});
+
+renderer.domElement.addEventListener("pointerdown", (event) => {
+  if (!controls.isLocked) {
+    if (event.button === 0) draggingLook = true;
+    focusGameInput();
+    return;
+  }
+  if (event.button === 0) primaryMouseDown = true;
+  if (event.button === 2) blockPlacement.place(camera);
+  focusGameInput();
+});
+
+window.addEventListener("pointerup", (event) => {
+  if (event.button === 0) primaryMouseDown = false;
+  draggingLook = false;
+});
+
+renderer.domElement.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  blockPlacement.cycleSelection(event.deltaY > 0 ? 1 : -1);
+  syncBuildToolbarSelection();
+}, { passive: false });
+
+toolbarButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const action = button.dataset.action;
+    if (action === "global-forces") engine.setGlobalDebug({ forces: !engine.getGlobalDebug().forces });
+    if (action === "global-velocity") engine.setGlobalDebug({ velocity: !engine.getGlobalDebug().velocity });
+    if (action === "toggle-gravity") setEnvironmentGravity(engine.getEnvironment().gravity.y === 0);
+    if (action === "toggle-wind") setEnvironmentWind(engine.getEnvironment().wind.x === 0 && engine.getEnvironment().wind.z === 0);
+    if (action === "attach-world") engine.setParentPreserveWorld("player", engine.rootId);
+    if (action === "attach-ship") engine.setParentPreserveWorld("player", "ship");
+    if (action === "attach-island") engine.setParentPreserveWorld("player", "island");
+    if (action === "debug-selected-forces") {
+      const current = engine.getEntity(selectedEntityId);
+      if (current) engine.setDebugFlags(selectedEntityId, { forces: !current.debug.forces });
+    }
+    if (action === "debug-selected-velocity") {
+      const current = engine.getEntity(selectedEntityId);
+      if (current) engine.setDebugFlags(selectedEntityId, { velocity: !current.debug.velocity });
+    }
+    if (action === "cycle-selected") cycleSelectedEntity();
+    renderEntityList();
+    updateToolbarLabels();
+  });
+});
+
+renderer.domElement.addEventListener("click", () => controls.lock());
+renderer.domElement.addEventListener("click", () => focusGameInput());
+renderer.domElement.addEventListener("contextmenu", (event) => event.preventDefault());
+window.addEventListener("pointerlockchange", () => {
+  draggingLook = false;
+});
+window.addEventListener("blur", () => {
+  keys.clear();
+  movementForward = 0;
+  movementStrafe = 0;
+  movementVertical = 0;
+});
+
+const clock = new THREE.Clock();
+
+function updateCamera() {
+  const player = engine.getIntrospection("player");
+  const worldPos = new THREE.Vector3(player.worldTransform.position.x, player.worldTransform.position.y, player.worldTransform.position.z);
+  controls.object.position.copy(worldPos.clone().add(new THREE.Vector3(0, 1.7, 0)));
+  controls.object.quaternion.setFromEuler(new THREE.Euler(cameraPitch, cameraYaw, 0, "YXZ"));
+}
+
+function render() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  engine.clearAllForces();
+  applyGravityAndBuoyancy(engine, {
+    waterLevel: WATER_LEVEL,
+    gravityEnabled,
+    resolveBlockMass: (blockId) => blockRegistry.getBlock(blockId)?.mass ?? 1
+  });
+  updatePlayerMotion(engine, {
+    playerId: "player",
+    cameraYaw,
+    cameraPitch,
+    movementForward,
+    movementStrafe,
+    movementVertical,
+    sprint: keys.has("ShiftLeft")
+  });
+  engine.step(dt);
+
+  const destroyState = blockPlacement.update(camera, dt, performance.now(), primaryMouseDown);
+  const cursorHit = blockPlacement.raycast(camera);
+
+  for (const id of entityViews.keys()) syncEntityView(id);
+  debugVectorRenderer.render();
+  blockPlacement.createGhostMeshes(ghostGroup, camera);
+  if (destroyProgressEl) {
+    destroyProgressEl.style.setProperty("--progress", String(destroyState.progress ?? 0));
+    destroyProgressEl.classList.toggle("visible", Boolean(primaryMouseDown && destroyState.hit));
+  }
+  updateInfoPanel(cursorHit?.blockId ?? null);
+  updateToolbarLabels();
+  updateCamera();
+
+  waterMaterial.uniforms.uTime.value = clock.elapsedTime;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(render);
+}
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+setEnvironmentGravity(true);
+setEnvironmentWind(false);
+engine.setWorldVelocity("ship", { x: 0, y: 0, z: 0 });
+engine.setWorldVelocity("catamaran", { x: 0, y: 0, z: 0 });
+engine.setWorldVelocity("peniche", { x: 0, y: 0, z: 0 });
+engine.setWorldVelocity("player", { x: 0, y: 0, z: 0 });
+render();
