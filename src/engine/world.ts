@@ -338,13 +338,13 @@ export class VoxelWorldEngine {
       const accel = entity.runtime.forces.accumulated;
       const torque = entity.runtime.forces.accumulatedTorque;
       entity.runtime.localVelocity = addVec3(entity.runtime.localVelocity, mulVec3(accel, dt));
-      entity.runtime.localVelocity = mulVec3(entity.runtime.localVelocity, 0.992);
+      entity.runtime.localVelocity = mulVec3(entity.runtime.localVelocity, Math.pow(0.992, dt * 60));
 
       // Voxel count provides a lightweight inertia approximation until full rigid-body mass properties exist.
       const inertia = Math.max(1, voxelCount(entity.voxels));
       const angularAccel = mulVec3(torque, 1 / inertia);
       entity.runtime.angularVelocity = addVec3(entity.runtime.angularVelocity, mulVec3(angularAccel, dt));
-      entity.runtime.angularVelocity = mulVec3(entity.runtime.angularVelocity, 0.985);
+      entity.runtime.angularVelocity = mulVec3(entity.runtime.angularVelocity, Math.pow(0.985, dt * 60));
 
       const angularSpeed = lengthVec3(entity.runtime.angularVelocity);
       if (angularSpeed > 1e-6) {

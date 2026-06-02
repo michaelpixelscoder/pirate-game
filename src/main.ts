@@ -646,13 +646,15 @@ document.addEventListener("keyup", (event) => {
 
 window.addEventListener("mousemove", (event) => {
   if (!controls.isLocked && !draggingLook) return;
-  cameraYaw -= event.movementX * 0.0022;
-  cameraPitch = THREE.MathUtils.clamp(cameraPitch - event.movementY * 0.0022, -1.45, 1.2);
+  const dx = THREE.MathUtils.clamp(event.movementX, -50, 50);
+  const dy = THREE.MathUtils.clamp(event.movementY, -50, 50);
+  cameraYaw -= dx * 0.0022;
+  cameraPitch = THREE.MathUtils.clamp(cameraPitch - dy * 0.0022, -1.45, 1.2);
 });
 
 renderer.domElement.addEventListener("pointerdown", (event) => {
   if (!controls.isLocked) {
-    if (event.button === 0) draggingLook = true;
+    if (event.button === 0) renderer.domElement.requestPointerLock();
     focusGameInput();
     return;
   }
