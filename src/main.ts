@@ -198,13 +198,13 @@ function blockTextureKey(block: string) {
 
 function textureSwatchStyle(textureKey: string) {
   if (textureKey === "rudder") {
-    return "background-image:url('/textures/rudder.png');background-size:cover;background-position:center;";
+    return `background-image:url('${base}textures/rudder.png');background-size:cover;background-position:center;`;
   }
   const tile = atlasTiles[textureKey];
   if (!tile) return "";
   const xPercent = (tile.col / Math.max(1, ATLAS_GRID_COLS - 1)) * 100;
   const yPercent = (tile.row / Math.max(1, ATLAS_GRID_ROWS - 1)) * 100;
-  return `background-image:url('/textures/block-atlas.png');background-size:${ATLAS_GRID_COLS * 100}% ${ATLAS_GRID_ROWS * 100}%;background-position:${xPercent}% ${yPercent}%;`;
+  return `background-image:url('${base}textures/block-atlas.png');background-size:${ATLAS_GRID_COLS * 100}% ${ATLAS_GRID_ROWS * 100}%;background-position:${xPercent}% ${yPercent}%;`;
 }
 
 function buildToolbarSwatch(entry: { icon: string; blockId?: string }, index: number) {
