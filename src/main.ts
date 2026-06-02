@@ -158,7 +158,7 @@ function setMovementState(event: KeyboardEvent, isDown: boolean) {
   if (event.code === "KeyD") movementStrafe = isDown ? 1 : 0;
   if (event.code === "KeyA") movementStrafe = isDown ? -1 : 0;
   if (event.code === "Space") movementVertical = isDown ? 1 : 0;
-  if (event.code === "ControlLeft") movementVertical = isDown ? -1 : 0;
+  if (event.code === "KeyC") movementVertical = isDown ? -1 : 0;
 }
 
 function blockColor(block: string) {
@@ -618,7 +618,6 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   keys.add(event.code);
-  if (event.code === "KeyC" && !event.repeat) cycleSelectedEntity();
   if (event.code === "KeyR" && !event.repeat) {
     blockPlacement.rotateSelection();
     syncBuildToolbarSelection();
@@ -635,13 +634,13 @@ document.addEventListener("keydown", (event) => {
     }
   }
   setMovementState(event, true);
-  if (["Space", "ControlLeft", "KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) event.preventDefault();
+  if (["Space", "KeyC", "KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) event.preventDefault();
 });
 
 document.addEventListener("keyup", (event) => {
   keys.delete(event.code);
   setMovementState(event, false);
-  if (["Space", "ControlLeft", "KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) event.preventDefault();
+  if (["Space", "KeyC", "KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) event.preventDefault();
 });
 
 window.addEventListener("mousemove", (event) => {
