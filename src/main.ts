@@ -30,14 +30,15 @@ const BLOCK_COLORS: Record<string, number> = {
 };
 
 const textureLoader = new THREE.TextureLoader();
-const atlasTexture = textureLoader.load("/textures/block-atlas.png");
+const base = import.meta.env.BASE_URL;
+const atlasTexture = textureLoader.load(`${base}textures/block-atlas.png`);
 atlasTexture.wrapS = THREE.RepeatWrapping;
 atlasTexture.wrapT = THREE.RepeatWrapping;
 atlasTexture.magFilter = THREE.NearestFilter;
 atlasTexture.minFilter = THREE.NearestMipmapNearestFilter;
 atlasTexture.colorSpace = THREE.SRGBColorSpace;
 
-const rudderTexture = textureLoader.load("/textures/rudder.png");
+const rudderTexture = textureLoader.load(`${base}textures/rudder.png`);
 rudderTexture.wrapS = THREE.RepeatWrapping;
 rudderTexture.wrapT = THREE.RepeatWrapping;
 rudderTexture.magFilter = THREE.NearestFilter;
