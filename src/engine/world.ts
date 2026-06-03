@@ -151,7 +151,7 @@ export class VoxelWorldEngine {
       : undefined;
     const entity: EntityMetadata = {
       id,
-      name: input.name,
+      name: input.name ?? id,
       kind: input.kind ?? (voxels ? "voxel" : "generic"),
       physics: input.physics ?? "static",
       collides: input.collides ?? true,

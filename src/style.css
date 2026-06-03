@@ -349,6 +349,140 @@ canvas {
   white-space: pre-wrap;
 }
 
+/* ---- Start menu ---- */
+.start-menu {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  backdrop-filter: blur(6px);
+}
+
+.start-menu__panel {
+  background: #1a1e24;
+  border: 1px solid #2e3540;
+  border-radius: 14px;
+  padding: 40px 48px;
+  text-align: center;
+  min-width: 320px;
+  max-width: 440px;
+  width: 100%;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.start-menu__logo {
+  font-size: 52px;
+  margin-bottom: 8px;
+}
+
+.start-menu__title {
+  color: #e8eaed;
+  font-size: 26px;
+  font-weight: 700;
+  margin: 0 0 24px;
+}
+
+.start-menu__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.start-menu__btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 11px 16px;
+  background: #252a31;
+  border: 1px solid #2e3540;
+  color: #e8eaed;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.12s;
+}
+
+.start-menu__btn:hover {
+  background: #2e3540;
+}
+
+.start-menu__btn--primary {
+  background: #1a3560;
+  border-color: #3a6bbf;
+  font-weight: 600;
+  font-size: 15px;
+  justify-content: center;
+}
+
+.start-menu__btn--primary:hover {
+  background: #1e3f74;
+}
+
+.start-menu__date {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.start-menu__level-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.start-menu__level-row .start-menu__btn {
+  flex: 1;
+  text-decoration: none;
+}
+
+.start-menu__edit-btn {
+  display: flex;
+  align-items: center;
+  padding: 0 13px;
+  background: #252a31;
+  border: 1px solid #2e3540;
+  color: #6b7280;
+  border-radius: 7px;
+  font-size: 13px;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.start-menu__edit-btn:hover {
+  background: #2e3540;
+  color: #e8eaed;
+}
+
+.start-menu__saved-label {
+  font-size: 11px;
+  color: #6b7280;
+  text-align: left;
+  margin: 6px 0 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.start-menu__sep {
+  border: none;
+  border-top: 1px solid #2e3540;
+  margin: 6px 0;
+}
+
+.start-menu__link {
+  color: #6b7280;
+  font-size: 12px;
+  text-decoration: none;
+  transition: color 0.12s;
+}
+
+.start-menu__link:hover {
+  color: #e8eaed;
+}
+
 .file-picker {
   display: none;
 }

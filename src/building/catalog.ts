@@ -33,6 +33,7 @@ export function createDefaultBlockRegistry() {
   registry.registerBlock({ id: "stone_block", name: "Stone", icon: "■", color: 0x87919a, mass: 2.4, cells: cubeCells() }, true);
   registry.registerBlock({ id: "dirt_block", name: "Dirt", icon: "▩", color: 0x7b5535, mass: 1.5, cells: cubeCells() }, true);
   registry.registerBlock({ id: "sand_block", name: "Sand", icon: "▨", color: 0xd9c47c, mass: 1.65, cells: cubeCells() }, true);
+  registry.registerBlock({ id: "grass_block", name: "Grass", icon: "▒", color: 0x4a9e3f, mass: 0.9, cells: cubeCells() }, true);
   registry.registerBlock({ id: "wood_trunk_block", name: "Trunk", icon: "│", color: 0x6b4629, mass: 0.72, cells: cubeCells() }, true);
   registry.registerBlock({ id: "foliage_block", name: "Foliage", icon: "✿", color: 0x3f8f4d, mass: 0.18, cells: cubeCells() }, true);
   registry.registerBlock({ id: "wood_plank_block", name: "Plank", icon: "▤", color: 0xb8824c, mass: 0.58, cells: cubeCells() }, true);

@@ -3,13 +3,16 @@ import * as THREE from "three";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 import { VoxelWorldEngine } from "./engine";
 import { createDefaultBlockRegistry, BlockPlacementSystem } from "./building";
-import { DebugVectorRenderer, clearGroup } from "./rendering/debugVectors";
-import { applyGravityAndBuoyancy } from "./gameplay/buoyancy";
+import { DebugVectorRenderer } from "./rendering/debugVectors";
+import { applyGravityAndBuoyancy, buildStaticSurface } from "./gameplay/buoyancy";
 import { updatePlayerMotion } from "./gameplay/playerController";
 import { createWaterMaterial } from "./rendering/water";
 import { createBoatTemplate, createCatamaranTemplate, createPenicheTemplate } from "./worlds/boat";
 import { createIslandTemplate } from "./worlds/island";
 import { templateVoxels } from "./worlds/utils.ts";
+import { loadWorldFromUrl, loadWorldFromObject } from "./levelLoader";
+import type { FlatEntityDef } from "./levelLoader";
+import { loadSavedLevel, listSavedLevels } from "./storage";
 import type { EntityId, VoxelCell } from "./engine";
 
 type EntityView = {
@@ -21,6 +24,7 @@ const BLOCK_COLORS: Record<string, number> = {
   stone: 0x87919a,
   dirt: 0x7b5535,
   sand: 0xd9c47c,
+  grass: 0x4a9e3f,
   wood_trunk: 0x6b4629,
   foliage: 0x3f8f4d,
   wood_plank: 0xb8824c,
@@ -84,7 +88,23 @@ const forcesEl = document.querySelector<HTMLDivElement>(".forces");
 const blockToolbarEl = document.querySelector<HTMLDivElement>(".block-toolbar");
 const toolbarEl = document.querySelector<HTMLDivElement>(".toolbar");
 const destroyProgressEl = document.querySelector<HTMLDivElement>(".destroy-progress");
-const WATER_LEVEL = -0.1;
+const WATER_LEVEL = 0;
+const SEA_FLOOR = -17.9;
+
+// URL spawn parameters
+const urlParams = new URLSearchParams(window.location.search);
+const spawnX = parseFloat(urlParams.get("x") ?? "0");
+const spawnY = parseFloat(urlParams.get("y") ?? "5");
+const spawnZ = parseFloat(urlParams.get("z") ?? "0");
+const spawnYaw = parseFloat(urlParams.get("yaw") ?? "0");
+const spawnPitch = parseFloat(urlParams.get("pitch") ?? "-0.1");
+const hideUI = urlParams.has("hideUI");
+
+if (hideUI) {
+  document.querySelectorAll<HTMLElement>(".hud, .info, .forces, .block-toolbar, .toolbar, .reticle, .destroy-progress").forEach((el) => {
+    el.style.display = "none";
+  });
+}
 
 const engine = new VoxelWorldEngine();
 const blockRegistry = createDefaultBlockRegistry();
@@ -124,13 +144,13 @@ water.position.y = WATER_LEVEL;
 water.renderOrder = 1;
 scene.add(water);
 
-const underWater = new THREE.Mesh(
+const seaFloor = new THREE.Mesh(
   new THREE.PlaneGeometry(2000, 2000, 1, 1),
-  new THREE.MeshStandardMaterial({ color: 0x082739, roughness: 1, metalness: 0 })
+  new THREE.MeshStandardMaterial({ color: 0xb09060, roughness: 0.95, metalness: 0 })
 );
-underWater.rotation.x = -Math.PI / 2;
-underWater.position.y = WATER_LEVEL - 0.4;
-scene.add(underWater);
+seaFloor.rotation.x = -Math.PI / 2;
+seaFloor.position.y = SEA_FLOOR;
+scene.add(seaFloor);
 
 const entityViews = new Map<EntityId, EntityView>();
 scene.add(debugVectorRenderer.group);
@@ -141,8 +161,8 @@ scene.add(ghostGroup);
 const keys = new Set<string>();
 let selectedEntityId: EntityId = "ship";
 let gravityEnabled = true;
-let cameraYaw = 0;
-let cameraPitch = -0.1;
+let cameraYaw = spawnYaw;
+let cameraPitch = spawnPitch;
 let draggingLook = false;
 let movementForward = 0;
 let movementStrafe = 0;
@@ -168,6 +188,7 @@ function blockColor(block: string) {
   if (block.includes("stone")) return BLOCK_COLORS.stone;
   if (block.includes("dirt")) return BLOCK_COLORS.dirt;
   if (block.includes("sand")) return BLOCK_COLORS.sand;
+  if (block.includes("grass")) return BLOCK_COLORS.grass;
   if (block.includes("trunk")) return BLOCK_COLORS.wood_trunk;
   if (block.includes("foliage")) return BLOCK_COLORS.foliage;
   if (block.includes("plank")) return BLOCK_COLORS.wood_plank;
@@ -189,6 +210,7 @@ function blockTextureKey(block: string) {
   if (block.includes("stone")) return "stone";
   if (block.includes("dirt")) return "dirt";
   if (block.includes("sand")) return "sand";
+  if (block.includes("grass")) return null; // fallback to green color until a grass texture is added
   if (block.includes("trunk") || block.includes("mast")) return "wood_trunk";
   if (block.includes("foliage")) return "foliage";
   if (block.includes("plank") || block.includes("beam") || block.includes("bollard") || block.includes("keel")) return "wood_plank";
@@ -256,13 +278,37 @@ function quatToString(v: { x: number; y: number; z: number; w: number }, digits 
   return `${v.x.toFixed(digits)}, ${v.y.toFixed(digits)}, ${v.z.toFixed(digits)}, ${v.w.toFixed(digits)}`;
 }
 
-function createVoxelMesh(voxel: VoxelCell) {
-  const material = blockMaterial(voxel.value);
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), material);
-  mesh.position.set(voxel.x + 0.5, voxel.y + 0.5, voxel.z + 0.5);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  return mesh;
+const sharedBoxGeometry = new THREE.BoxGeometry(1, 1, 1);
+const _instanceDummy = new THREE.Object3D();
+
+function clearEntityGroup(group: THREE.Group) {
+  while (group.children.length) {
+    const child = group.children[0];
+    group.remove(child);
+    if (child instanceof THREE.InstancedMesh) child.instanceMatrix.dispose();
+  }
+}
+
+function buildInstancedVoxelMeshes(group: THREE.Group, voxels: Iterable<VoxelCell>) {
+  const byKey = new Map<string, VoxelCell[]>();
+  for (const voxel of voxels) {
+    const key = blockTextureKey(voxel.value) ?? `color:${voxel.value}`;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key)!.push(voxel);
+  }
+  for (const cells of byKey.values()) {
+    const mat = blockMaterial(cells[0].value);
+    const mesh = new THREE.InstancedMesh(sharedBoxGeometry, mat, cells.length);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    for (let i = 0; i < cells.length; i++) {
+      _instanceDummy.position.set(cells[i].x + 0.5, cells[i].y + 0.5, cells[i].z + 0.5);
+      _instanceDummy.updateMatrix();
+      mesh.setMatrixAt(i, _instanceDummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    group.add(mesh);
+  }
 }
 
 function createEntityView(id: EntityId) {
@@ -283,8 +329,8 @@ function syncEntityView(id: EntityId) {
   if (entity.kind === "voxel") {
     const voxelCount = entity.voxels?.size ?? 0;
     if (view.voxelCount !== voxelCount) {
-      clearGroup(view.group);
-      for (const voxel of entity.voxels?.values() ?? []) view.group.add(createVoxelMesh(voxel));
+      clearEntityGroup(view.group);
+      buildInstancedVoxelMeshes(view.group, entity.voxels?.values() ?? []);
       view.voxelCount = voxelCount;
     }
   }
@@ -502,100 +548,147 @@ function setEnvironmentWind(enabled: boolean) {
   updateToolbarLabels();
 }
 
-const shipTemplate = createBoatTemplate();
-const catamaranTemplate = createCatamaranTemplate();
-const penicheTemplate = createPenicheTemplate();
-const islandTemplate = createIslandTemplate();
+// Initialized lazily in initDefaultEntities / initGameEntities before render() starts
+let staticSurfaceCache = buildStaticSurface(engine);
 
-engine.createEntity({
-  id: "island",
-  name: islandTemplate.name,
-  kind: "voxel",
-  physics: "static",
-  collides: true,
-  parentId: engine.rootId,
-  transform: {
-    position: { x: islandTemplate.position[0], y: islandTemplate.position[1], z: islandTemplate.position[2] },
-    rotation: { x: islandTemplate.rotation[0], y: islandTemplate.rotation[1], z: islandTemplate.rotation[2], w: islandTemplate.rotation[3] }
-  },
-  voxels: templateVoxels(islandTemplate.voxels)
-});
+function initDefaultEntities() {
+  const shipTemplate = createBoatTemplate();
+  const catamaranTemplate = createCatamaranTemplate();
+  const penicheTemplate = createPenicheTemplate();
+  const islandTemplate = createIslandTemplate();
 
-engine.createEntity({
-  id: "ship",
-  name: shipTemplate.name,
-  kind: "voxel",
-  physics: "dynamic",
-  collides: true,
-  parentId: engine.rootId,
-  transform: {
-    position: { x: shipTemplate.position[0], y: shipTemplate.position[1], z: shipTemplate.position[2] },
-    rotation: { x: shipTemplate.rotation[0], y: shipTemplate.rotation[1], z: shipTemplate.rotation[2], w: shipTemplate.rotation[3] }
-  },
-  voxels: templateVoxels(shipTemplate.voxels),
-  debug: { forces: true, velocity: true }
-});
+  engine.createEntity({
+    id: "island",
+    name: islandTemplate.name,
+    kind: "voxel",
+    physics: "static",
+    collides: true,
+    parentId: engine.rootId,
+    transform: {
+      position: { x: islandTemplate.position[0], y: islandTemplate.position[1], z: islandTemplate.position[2] },
+      rotation: { x: islandTemplate.rotation[0], y: islandTemplate.rotation[1], z: islandTemplate.rotation[2], w: islandTemplate.rotation[3] }
+    },
+    voxels: templateVoxels(islandTemplate.voxels)
+  });
 
-engine.createEntity({
-  id: "catamaran",
-  name: catamaranTemplate.name,
-  kind: "voxel",
-  physics: "dynamic",
-  collides: true,
-  parentId: engine.rootId,
-  transform: {
-    position: { x: catamaranTemplate.position[0], y: catamaranTemplate.position[1], z: catamaranTemplate.position[2] },
-    rotation: {
-      x: catamaranTemplate.rotation[0],
-      y: catamaranTemplate.rotation[1],
-      z: catamaranTemplate.rotation[2],
-      w: catamaranTemplate.rotation[3]
-    }
-  },
-  voxels: templateVoxels(catamaranTemplate.voxels)
-});
+  engine.createEntity({
+    id: "ship",
+    name: shipTemplate.name,
+    kind: "voxel",
+    physics: "dynamic",
+    collides: true,
+    parentId: engine.rootId,
+    transform: {
+      position: { x: shipTemplate.position[0], y: shipTemplate.position[1], z: shipTemplate.position[2] },
+      rotation: { x: shipTemplate.rotation[0], y: shipTemplate.rotation[1], z: shipTemplate.rotation[2], w: shipTemplate.rotation[3] }
+    },
+    voxels: templateVoxels(shipTemplate.voxels),
+    debug: { forces: true, velocity: true }
+  });
 
-engine.createEntity({
-  id: "peniche",
-  name: penicheTemplate.name,
-  kind: "voxel",
-  physics: "dynamic",
-  collides: true,
-  parentId: engine.rootId,
-  transform: {
-    position: { x: penicheTemplate.position[0], y: penicheTemplate.position[1], z: penicheTemplate.position[2] },
-    rotation: {
-      x: penicheTemplate.rotation[0],
-      y: penicheTemplate.rotation[1],
-      z: penicheTemplate.rotation[2],
-      w: penicheTemplate.rotation[3]
-    }
-  },
-  voxels: templateVoxels(penicheTemplate.voxels)
-});
+  engine.createEntity({
+    id: "catamaran",
+    name: catamaranTemplate.name,
+    kind: "voxel",
+    physics: "dynamic",
+    collides: true,
+    parentId: engine.rootId,
+    transform: {
+      position: { x: catamaranTemplate.position[0], y: catamaranTemplate.position[1], z: catamaranTemplate.position[2] },
+      rotation: {
+        x: catamaranTemplate.rotation[0],
+        y: catamaranTemplate.rotation[1],
+        z: catamaranTemplate.rotation[2],
+        w: catamaranTemplate.rotation[3]
+      }
+    },
+    voxels: templateVoxels(catamaranTemplate.voxels)
+  });
 
-engine.createEntity({
-  id: "player",
-  name: "player",
-  kind: "generic",
-  physics: "dynamic",
-  collides: false,
-  parentId: "island",
-  transform: {
-    position: { x: 10, y: 7, z: -1 },
-    rotation: { x: 0, y: 0, z: 0, w: 1 }
-  },
-  debug: { velocity: true }
-});
+  engine.createEntity({
+    id: "peniche",
+    name: penicheTemplate.name,
+    kind: "voxel",
+    physics: "dynamic",
+    collides: true,
+    parentId: engine.rootId,
+    transform: {
+      position: { x: penicheTemplate.position[0], y: penicheTemplate.position[1], z: penicheTemplate.position[2] },
+      rotation: {
+        x: penicheTemplate.rotation[0],
+        y: penicheTemplate.rotation[1],
+        z: penicheTemplate.rotation[2],
+        w: penicheTemplate.rotation[3]
+      }
+    },
+    voxels: templateVoxels(penicheTemplate.voxels)
+  });
 
-createEntityView("island");
-createEntityView("ship");
-createEntityView("catamaran");
-createEntityView("peniche");
-createEntityView("player");
-renderEntityList();
-setSelectedEntity("ship");
-renderBuildToolbar();
+  engine.createEntity({
+    id: "player",
+    name: "player",
+    kind: "generic",
+    physics: "dynamic",
+    collides: false,
+    parentId: engine.rootId,
+    transform: {
+      position: { x: spawnX, y: spawnY, z: spawnZ },
+      rotation: { x: 0, y: 0, z: 0, w: 1 }
+    },
+    debug: { velocity: true }
+  });
+
+  createEntityView("island");
+  createEntityView("ship");
+  createEntityView("catamaran");
+  createEntityView("peniche");
+  createEntityView("player");
+  renderEntityList();
+  setSelectedEntity("ship");
+  renderBuildToolbar();
+  staticSurfaceCache = buildStaticSurface(engine);
+}
+
+function initGameEntities(entities: FlatEntityDef[]) {
+  engine.createEntity({
+    id: "player",
+    name: "player",
+    kind: "generic",
+    physics: "dynamic",
+    collides: false,
+    parentId: engine.rootId,
+    transform: {
+      position: { x: spawnX, y: spawnY, z: spawnZ },
+      rotation: { x: 0, y: 0, z: 0, w: 1 }
+    },
+    debug: { velocity: true }
+  });
+
+  let firstDynamicId: EntityId | null = null;
+  for (const def of entities) {
+    engine.createEntity({
+      id: def.id,
+      name: def.name,
+      kind: "voxel",
+      physics: def.physics,
+      collides: true,
+      parentId: engine.rootId,
+      transform: {
+        position: { x: def.position[0], y: def.position[1], z: def.position[2] },
+        rotation: { x: def.rotation[0], y: def.rotation[1], z: def.rotation[2], w: def.rotation[3] }
+      },
+      voxels: def.voxels.map((v) => ({ x: v.x, y: v.y, z: v.z, value: v.value }))
+    });
+    createEntityView(def.id);
+    if (!firstDynamicId && def.physics === "dynamic") firstDynamicId = def.id;
+  }
+
+  createEntityView("player");
+  renderEntityList();
+  setSelectedEntity(firstDynamicId ?? "player");
+  renderBuildToolbar();
+  staticSurfaceCache = buildStaticSurface(engine);
+}
 
 if (!toolbarEl) throw new Error("Missing toolbar panel");
   toolbarEl.innerHTML = `
@@ -725,8 +818,10 @@ function render() {
   engine.clearAllForces();
   applyGravityAndBuoyancy(engine, {
     waterLevel: WATER_LEVEL,
+    floorY: SEA_FLOOR,
     gravityEnabled,
-    resolveBlockMass: (blockId) => blockRegistry.getBlock(blockId)?.mass ?? 1
+    resolveBlockMass: (blockId) => blockRegistry.getBlock(blockId)?.mass ?? 1,
+    staticSurface: staticSurfaceCache
   });
   updatePlayerMotion(engine, {
     playerId: "player",
@@ -767,8 +862,84 @@ window.addEventListener("resize", () => {
 
 setEnvironmentGravity(true);
 setEnvironmentWind(false);
-engine.setWorldVelocity("ship", { x: 0, y: 0, z: 0 });
-engine.setWorldVelocity("catamaran", { x: 0, y: 0, z: 0 });
-engine.setWorldVelocity("peniche", { x: 0, y: 0, z: 0 });
-engine.setWorldVelocity("player", { x: 0, y: 0, z: 0 });
-render();
+
+async function showStartMenu(): Promise<FlatEntityDef[] | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "start-menu";
+    const assetBase = `${import.meta.env.BASE_URL}assets/`;
+    const savedLevels = listSavedLevels();
+    const editorBase = `${import.meta.env.BASE_URL}editor/`;
+    const savedHtml = savedLevels.length
+      ? `<p class="start-menu__saved-label">Saved levels</p>` +
+        savedLevels
+          .map(
+            (l) => {
+              const enc = encodeURIComponent(l.id);
+              const date = new Date(l.savedAt).toLocaleDateString();
+              return `<div class="start-menu__level-row">
+                <a class="start-menu__btn" href="?localLevel=${enc}">${l.name} <span class="start-menu__date">${date}</span></a>
+                <a class="start-menu__edit-btn" href="${editorBase}?localLevel=${enc}" title="Open in editor">✏</a>
+              </div>`;
+            }
+          )
+          .join("")
+      : "";
+    overlay.innerHTML = `
+      <div class="start-menu__panel">
+        <div class="start-menu__logo">⚓</div>
+        <h1 class="start-menu__title">Pirate Game</h1>
+        <div class="start-menu__actions">
+          <button class="start-menu__btn start-menu__btn--primary" id="sm-new-game">🌊 New Game</button>
+          ${savedHtml}
+          <hr class="start-menu__sep" />
+          <a class="start-menu__link" href="${import.meta.env.BASE_URL}editor/">Open Level Editor</a>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    overlay.querySelector<HTMLButtonElement>("#sm-new-game")!.addEventListener("click", async () => {
+      overlay.remove();
+      const entities = await loadWorldFromUrl(`${assetBase}world.asset.json`);
+      resolve(entities);
+    });
+  });
+}
+
+async function boot() {
+  const levelParam = urlParams.get("level");
+  const localLevelParam = urlParams.get("localLevel");
+  const assetBase = `${import.meta.env.BASE_URL}assets/`;
+  let entities: FlatEntityDef[] | null = null;
+
+  if (levelParam) {
+    entities = await loadWorldFromUrl(`${assetBase}${levelParam}`);
+  } else if (localLevelParam) {
+    const bundle = loadSavedLevel(localLevelParam);
+    if (bundle) {
+      entities = await loadWorldFromObject(bundle.world as any, `${assetBase}world.asset.json`, bundle.assets);
+    }
+  }
+
+  if (entities === null) {
+    entities = await showStartMenu();
+  }
+
+  if (entities && entities.length > 0) {
+    initGameEntities(entities);
+    for (const ent of engine.listEntities()) {
+      if (ent.physics === "dynamic") engine.setWorldVelocity(ent.id, { x: 0, y: 0, z: 0 });
+    }
+  } else {
+    initDefaultEntities();
+    engine.setWorldVelocity("ship", { x: 0, y: 0, z: 0 });
+    engine.setWorldVelocity("catamaran", { x: 0, y: 0, z: 0 });
+    engine.setWorldVelocity("peniche", { x: 0, y: 0, z: 0 });
+    engine.setWorldVelocity("player", { x: 0, y: 0, z: 0 });
+  }
+
+  render();
+}
+
+boot();

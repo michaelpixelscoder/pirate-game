@@ -1,47 +1,54 @@
-import * as THREE from "three";
-import type { VoxelWorldEngine } from "../engine";
+﻿import type { VoxelWorldEngine } from "../engine";
+import { rotateVec3ByQuat } from "../engine/math";
 
-type BuoyancyOptions = {
+export type BuoyancyOptions = {
   waterLevel: number;
   gravityEnabled: boolean;
   resolveBlockMass?: (blockId: string) => number;
+  /** Pre-built static surface map from buildStaticSurface() -- avoids O(static voxels) work every frame. */
+  staticSurface?: Map<string, number>;
+  /** Hard Y floor for dynamic entities. Only dynamic voxels are stopped here; static voxels are exempt and may go below. */
+  floorY?: number;
 };
 
-function getVoxelWorldPoint(engine: VoxelWorldEngine, entityId: string, voxel: { x: number; y: number; z: number }) {
-  const debug = engine.getIntrospection(entityId);
-  const rotation = new THREE.Quaternion(
-    debug.worldTransform.rotation.x,
-    debug.worldTransform.rotation.y,
-    debug.worldTransform.rotation.z,
-    debug.worldTransform.rotation.w
-  );
-  const scale = debug.worldTransform.scale;
-  const position = debug.worldTransform.position;
-  const local = new THREE.Vector3(voxel.x + 0.5, voxel.y + 0.5, voxel.z + 0.5);
-  local.multiply(new THREE.Vector3(scale.x, scale.y, scale.z));
-  local.applyQuaternion(rotation);
-  return local.add(new THREE.Vector3(position.x, position.y, position.z));
+function clamp01(x: number) {
+  return Math.min(1, Math.max(0, x));
 }
 
-function buildStaticSurfaceColumns(engine: VoxelWorldEngine) {
+function getVoxelWorldPoint(engine: VoxelWorldEngine, entityId: string, voxel: { x: number; y: number; z: number }) {
+  const info = engine.getIntrospection(entityId);
+  const { rotation, scale, position } = info.worldTransform;
+  const local = {
+    x: (voxel.x + 0.5) * scale.x,
+    y: (voxel.y + 0.5) * scale.y,
+    z: (voxel.z + 0.5) * scale.z
+  };
+  const rotated = rotateVec3ByQuat(local, rotation);
+  return { x: position.x + rotated.x, y: position.y + rotated.y, z: position.z + rotated.z };
+}
+
+/**
+ * Build a column-top map for all static voxel entities.
+ * Cache this result and pass via options.staticSurface to avoid
+ * re-iterating all static voxels every physics frame.
+ */
+export function buildStaticSurface(engine: VoxelWorldEngine): Map<string, number> {
   const columns = new Map<string, number>();
   for (const entity of engine.listEntities()) {
     if (entity.kind !== "voxel" || entity.physics !== "static") continue;
     for (const voxel of entity.voxels?.values() ?? []) {
-      const worldPoint = getVoxelWorldPoint(engine, entity.id, voxel);
-      const columnX = Math.floor(worldPoint.x);
-      const columnZ = Math.floor(worldPoint.z);
-      const key = `${columnX},${columnZ}`;
-      const topY = worldPoint.y + 0.5;
-      const previous = columns.get(key);
-      if (previous === undefined || topY > previous) columns.set(key, topY);
+      const wp = getVoxelWorldPoint(engine, entity.id, voxel);
+      const key = `${Math.floor(wp.x)},${Math.floor(wp.z)}`;
+      const topY = wp.y + 0.5;
+      const prev = columns.get(key);
+      if (prev === undefined || topY > prev) columns.set(key, topY);
     }
   }
   return columns;
 }
 
 export function applyGravityAndBuoyancy(engine: VoxelWorldEngine, options: BuoyancyOptions) {
-  const staticSurface = buildStaticSurfaceColumns(engine);
+  const staticSurface = options.staticSurface ?? buildStaticSurface(engine);
   const gravity = 9.81;
   const waterDensity = 1.0;
   const waterLinearDrag = 2.2;
@@ -51,87 +58,88 @@ export function applyGravityAndBuoyancy(engine: VoxelWorldEngine, options: Buoya
   for (const entity of engine.listEntities()) {
     if (entity.id === engine.rootId) continue;
     if (entity.physics !== "dynamic" || entity.kind !== "voxel") continue;
-    const debug = engine.getIntrospection(entity.id);
+    const info = engine.getIntrospection(entity.id);
 
     let totalMass = 0;
     let submergedVolume = 0;
     let totalVolume = 0;
-    const weightedCom = new THREE.Vector3();
+    let comX = 0, comY = 0, comZ = 0;
     let displacedMass = 0;
-    const weightedCob = new THREE.Vector3();
+    let cobX = 0, cobY = 0, cobZ = 0;
     let maxStaticPenetration = 0;
+    let maxFloorPenetration = 0;
 
     for (const voxel of entity.voxels?.values() ?? []) {
-      const worldPoint = getVoxelWorldPoint(engine, entity.id, voxel);
+      const wp = getVoxelWorldPoint(engine, entity.id, voxel);
       const blockMass = Math.max(0.01, options.resolveBlockMass?.(voxel.value) ?? 1);
       totalMass += blockMass;
-      weightedCom.addScaledVector(worldPoint, blockMass);
+      comX += wp.x * blockMass; comY += wp.y * blockMass; comZ += wp.z * blockMass;
       totalVolume += 1;
 
-      const depth = options.waterLevel - worldPoint.y;
-      const submersion = THREE.MathUtils.clamp((depth + 0.5) / 1.0, 0, 1);
+      const submersion = clamp01((options.waterLevel - wp.y + 0.5));
       if (submersion > 0) {
         submergedVolume += submersion;
-        // Treat each voxel as unit volume and scale displaced mass by submerged fraction.
         const displaced = waterDensity * submersion;
         displacedMass += displaced;
-        weightedCob.addScaledVector(worldPoint, displaced);
+        cobX += wp.x * displaced; cobY += wp.y * displaced; cobZ += wp.z * displaced;
       }
 
-      const columnKey = `${Math.floor(worldPoint.x)},${Math.floor(worldPoint.z)}`;
-      const surfaceY = staticSurface.get(columnKey);
+      const surfaceY = staticSurface.get(`${Math.floor(wp.x)},${Math.floor(wp.z)}`);
       if (surfaceY !== undefined) {
-        const voxelBottomY = worldPoint.y - 0.5;
-        const penetration = surfaceY - voxelBottomY;
+        const penetration = surfaceY - (wp.y - 0.5);
         if (penetration > maxStaticPenetration) maxStaticPenetration = penetration;
+      }
+
+      if (options.floorY !== undefined) {
+        const floorPen = options.floorY + 0.5 - wp.y;
+        if (floorPen > maxFloorPenetration) maxFloorPenetration = floorPen;
       }
     }
 
     if (totalMass <= 0) continue;
-    const centerOfMass = weightedCom.multiplyScalar(1 / totalMass);
+    const invMass = 1 / totalMass;
+    const com = { x: comX * invMass, y: comY * invMass, z: comZ * invMass };
 
     if (options.gravityEnabled) {
-      engine.addForce(entity.id, {
-        label: "gravity",
-        source: centerOfMass,
-        vector: { x: 0, y: -totalMass * gravity, z: 0 }
-      });
+      engine.addForce(entity.id, { label: "gravity", source: com, vector: { x: 0, y: -totalMass * gravity, z: 0 } });
     }
 
     if (displacedMass > 0) {
-      const centerOfBuoyancy = weightedCob.multiplyScalar(1 / displacedMass);
-      engine.addForce(entity.id, {
-        label: "buoyancy",
-        source: centerOfBuoyancy,
-        vector: { x: 0, y: displacedMass * gravity, z: 0 }
-      });
+      const invDisp = 1 / displacedMass;
+      const cob = { x: cobX * invDisp, y: cobY * invDisp, z: cobZ * invDisp };
+      engine.addForce(entity.id, { label: "buoyancy", source: cob, vector: { x: 0, y: displacedMass * gravity, z: 0 } });
     }
 
-    const submergedRatio = totalVolume > 0 ? THREE.MathUtils.clamp(submergedVolume / totalVolume, 0, 1) : 0;
-    const exposedRatio = 1 - submergedRatio;
-    const velocity = new THREE.Vector3(debug.worldVelocity.x, debug.worldVelocity.y, debug.worldVelocity.z);
-    const speed = velocity.length();
+    const submergedRatio = totalVolume > 0 ? clamp01(submergedVolume / totalVolume) : 0;
+    const wv = info.worldVelocity;
+    const speed = Math.sqrt(wv.x * wv.x + wv.y * wv.y + wv.z * wv.z);
     if (speed > 1e-4) {
-      const dragDirection = velocity.multiplyScalar(-1 / speed);
-      const waterDragMagnitude = waterLinearDrag * submergedRatio * speed;
-      const airDragMagnitude = airLinearDrag * exposedRatio * speed;
-      const dragMagnitude = Math.min(maxFluidDrag, waterDragMagnitude + airDragMagnitude);
-      const totalDrag = dragDirection.multiplyScalar(dragMagnitude);
+      const invSpeed = -1 / speed;
+      const dragMagnitude = Math.min(maxFluidDrag,
+        (waterLinearDrag * submergedRatio + airLinearDrag * (1 - submergedRatio)) * speed
+      );
       engine.addForce(entity.id, {
         label: "fluid-drag",
-        source: centerOfMass,
-        vector: { x: totalDrag.x, y: totalDrag.y, z: totalDrag.z }
+        source: com,
+        vector: { x: wv.x * invSpeed * dragMagnitude, y: wv.y * invSpeed * dragMagnitude, z: wv.z * invSpeed * dragMagnitude }
       });
     }
 
     if (maxStaticPenetration > 0) {
-      const upwardCorrection = maxStaticPenetration * 95;
-      const downwardVelocity = Math.max(0, -debug.worldVelocity.y);
-      const damping = downwardVelocity * 14;
+      const damping = Math.max(0, -wv.y) * 14;
       engine.addForce(entity.id, {
         label: "collision-support",
-        source: centerOfMass,
-        vector: { x: 0, y: upwardCorrection + damping, z: 0 }
+        source: com,
+        vector: { x: 0, y: maxStaticPenetration * 95 + damping, z: 0 }
+      });
+    }
+
+    if (maxFloorPenetration > 0) {
+      const damping = Math.max(0, -wv.y) * 14;
+      engine.addForce(entity.id, {
+        label: "floor-collision",
+        source: com,
+        vector: { x: 0, y: maxFloorPenetration * 95 + damping, z: 0 }
       });
     }
   }

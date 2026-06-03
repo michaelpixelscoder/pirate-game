@@ -49,7 +49,7 @@ export type EntityMetadata = {
 
 export type EntityCreationInput = {
   id?: EntityId;
-  name: string;
+  name?: string;
   kind?: EntityKind;
   physics?: EntityPhysicsMode;
   collides?: boolean;

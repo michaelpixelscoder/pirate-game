@@ -1,0 +1,28 @@
+{
+  "assets": [
+    {
+      "id": "world",
+      "name": "Main World",
+      "path": "world.asset.json",
+      "kind": "world"
+    },
+    {
+      "id": "tree",
+      "name": "Palm Tree",
+      "path": "lib/tree.asset.json",
+      "kind": "library"
+    },
+    {
+      "id": "cabin",
+      "name": "Cabin",
+      "path": "lib/cabin.asset.json",
+      "kind": "library"
+    },
+    {
+      "id": "ship_a",
+      "name": "Ship A (Sloop)",
+      "path": "lib/ship_a.asset.json",
+      "kind": "library"
+    }
+  ]
+}
